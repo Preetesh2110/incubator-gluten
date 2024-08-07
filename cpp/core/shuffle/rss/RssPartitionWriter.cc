@@ -54,13 +54,10 @@ arrow::Status RssPartitionWriter::evict(
     std::unique_ptr<InMemoryPayload> inMemoryPayload,
     Evict::type evictType,
     bool reuseBuffers,
-    bool hasComplexType) {
+    bool hasComplexType,
+    bool isFinal) {
   rawPartitionLengths_[partitionId] += inMemoryPayload->getBufferSize();
-
-  ScopedTimer timer(&spillTime_);
-  auto payloadType = (codec_ && inMemoryPayload->numRows() >= options_.compressionThreshold)
-      ? Payload::Type::kCompressed
-      : Payload::Type::kUncompressed;
+  auto payloadType = codec_ ? Payload::Type::kCompressed : Payload::Type::kUncompressed;
   ARROW_ASSIGN_OR_RAISE(
       auto payload, inMemoryPayload->toBlockPayload(payloadType, payloadPool_.get(), codec_ ? codec_.get() : nullptr));
   // Copy payload to arrow buffered os.
@@ -69,9 +66,18 @@ arrow::Status RssPartitionWriter::evict(
   payload = nullptr; // Invalidate payload immediately.
 
   // Push.
+  ScopedTimer timer(&spillTime_);
   ARROW_ASSIGN_OR_RAISE(auto buffer, rssBufferOs->Finish());
   bytesEvicted_[partitionId] += rssClient_->pushPartitionData(
       partitionId, reinterpret_cast<char*>(const_cast<uint8_t*>(buffer->data())), buffer->size());
+  return arrow::Status::OK();
+}
+
+arrow::Status RssPartitionWriter::evict(uint32_t partitionId, std::unique_ptr<BlockPayload> blockPayload, bool) {
+  rawPartitionLengths_[partitionId] += blockPayload->rawSize();
+  ScopedTimer timer(&spillTime_);
+  ARROW_ASSIGN_OR_RAISE(auto buffer, blockPayload->readBufferAt(0));
+  bytesEvicted_[partitionId] += rssClient_->pushPartitionData(partitionId, buffer->data_as<char>(), buffer->size());
   return arrow::Status::OK();
 }
 } // namespace gluten

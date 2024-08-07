@@ -77,21 +77,19 @@ case class CartesianProductExecTransformer(
     BackendsApiManager.getMetricsApiInstance.genNestedLoopJoinTransformerMetricsUpdater(metrics)
   }
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val leftPlanContext = left.asInstanceOf[TransformSupport].doTransform(context)
+  override protected def doTransform(context: SubstraitContext): TransformContext = {
+    val leftPlanContext = left.asInstanceOf[TransformSupport].transform(context)
     val (inputLeftRelNode, inputLeftOutput) =
       (leftPlanContext.root, leftPlanContext.outputAttributes)
 
-    val rightPlanContext = right.asInstanceOf[TransformSupport].doTransform(context)
+    val rightPlanContext = right.asInstanceOf[TransformSupport].transform(context)
     val (inputRightRelNode, inputRightOutput) =
       (rightPlanContext.root, rightPlanContext.outputAttributes)
 
-    val expressionNode = condition.map {
-      expr =>
-        ExpressionConverter
-          .replaceWithExpressionTransformer(expr, inputLeftOutput ++ inputRightOutput)
-          .doTransform(context.registeredFunction)
-    }
+    val expressionNode =
+      condition.map {
+        SubstraitUtil.toSubstraitExpression(_, inputLeftOutput ++ inputRightOutput, context)
+      }
 
     val extensionNode =
       JoinUtils.createExtensionNode(inputLeftOutput ++ inputRightOutput, validation = false)
@@ -112,7 +110,7 @@ case class CartesianProductExecTransformer(
 
   override protected def doValidateInternal(): ValidationResult = {
     if (!BackendsApiManager.getSettings.supportCartesianProductExec()) {
-      return ValidationResult.notOk("Cartesian product is not supported in this backend")
+      return ValidationResult.failed("Cartesian product is not supported in this backend")
     }
     val substraitContext = new SubstraitContext
     val expressionNode = condition.map {

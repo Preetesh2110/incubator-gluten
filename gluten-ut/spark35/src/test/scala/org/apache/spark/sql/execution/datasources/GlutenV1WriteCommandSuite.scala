@@ -16,6 +16,7 @@
  */
 package org.apache.spark.sql.execution.datasources
 
+import org.apache.gluten.GlutenColumnarWriteTestSupport
 import org.apache.gluten.execution.SortExecTransformer
 
 import org.apache.spark.sql.GlutenSQLTestsBaseTrait
@@ -96,7 +97,8 @@ trait GlutenV1WriteCommandSuiteBase extends V1WriteCommandSuiteBase {
 class GlutenV1WriteCommandSuite
   extends V1WriteCommandSuite
   with GlutenV1WriteCommandSuiteBase
-  with GlutenSQLTestsBaseTrait {
+  with GlutenSQLTestsBaseTrait
+  with GlutenColumnarWriteTestSupport {
 
   testGluten(
     "SPARK-41914: v1 write with AQE and in-partition sorted - non-string partition column") {
@@ -122,8 +124,7 @@ class GlutenV1WriteCommandSuite
             val executedPlan = FileFormatWriter.executedPlan.get
 
             val plan = if (enabled) {
-              assert(executedPlan.isInstanceOf[WriteFilesExec])
-              executedPlan.asInstanceOf[WriteFilesExec].child
+              checkWriteFilesAndGetChild(executedPlan)
             } else {
               executedPlan.transformDown { case a: AdaptiveSparkPlanExec => a.executedPlan }
             }
@@ -204,8 +205,7 @@ class GlutenV1WriteCommandSuite
           val executedPlan = FileFormatWriter.executedPlan.get
 
           val plan = if (enabled) {
-            assert(executedPlan.isInstanceOf[WriteFilesExec])
-            executedPlan.asInstanceOf[WriteFilesExec].child
+            checkWriteFilesAndGetChild(executedPlan)
           } else {
             executedPlan.transformDown { case a: AdaptiveSparkPlanExec => a.executedPlan }
           }

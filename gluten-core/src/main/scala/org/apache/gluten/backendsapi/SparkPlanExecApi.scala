@@ -19,6 +19,8 @@ package org.apache.gluten.backendsapi
 import org.apache.gluten.exception.GlutenNotSupportException
 import org.apache.gluten.execution._
 import org.apache.gluten.expression._
+import org.apache.gluten.extension.columnar.transition.{Convention, ConventionFunc}
+import org.apache.gluten.sql.shims.SparkShimLoader
 import org.apache.gluten.substrait.expression.{ExpressionBuilder, ExpressionNode, WindowFunctionNode}
 
 import org.apache.spark.ShuffleDependency
@@ -33,18 +35,20 @@ import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.optimizer.BuildSide
+import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.plans.JoinType
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, Partitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.{FileSourceScanExec, GenerateExec, LeafExecNode, SparkPlan}
-import org.apache.spark.sql.execution.datasources.{FileFormat, WriteFilesExec}
+import org.apache.spark.sql.execution.{BackendWrite, ColumnarWriteFilesExec, FileSourceScanExec, GenerateExec, LeafExecNode, SparkPlan}
+import org.apache.spark.sql.execution.datasources.{FileFormat, WriteJobDescription}
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, FileScan}
 import org.apache.spark.sql.execution.exchange.ShuffleExchangeExec
 import org.apache.spark.sql.execution.joins.BuildSideRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.execution.python.ArrowEvalPythonExec
 import org.apache.spark.sql.hive.HiveTableScanExecTransformer
-import org.apache.spark.sql.types.{LongType, NullType, StructType}
+import org.apache.spark.sql.types.{DecimalType, LongType, NullType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import java.lang.{Long => JLong}
@@ -54,21 +58,15 @@ import scala.collection.JavaConverters._
 
 trait SparkPlanExecApi {
 
-  /**
-   * Generate ColumnarToRowExecBase.
-   *
-   * @param child
-   * @return
-   */
-  def genColumnarToRowExec(child: SparkPlan): ColumnarToRowExecBase
+  /** The columnar-batch type this backend is using. */
+  def batchType: Convention.BatchType
 
   /**
-   * Generate RowToColumnarExec.
-   *
-   * @param child
-   * @return
+   * Overrides [[org.apache.gluten.extension.columnar.transition.ConventionFunc]] Gluten is using to
+   * determine the convention (its row-based processing / columnar-batch processing support) of a
+   * plan with a user-defined function that accepts a plan then returns batch type it outputs.
    */
-  def genRowToColumnarExec(child: SparkPlan): RowToColumnarExecBase
+  def batchTypeFunc(): ConventionFunc.BatchOverride = PartialFunction.empty
 
   /**
    * Generate FilterExecTransformer.
@@ -102,11 +100,10 @@ trait SparkPlanExecApi {
 
   /** Generate HashAggregateExecPullOutHelper */
   def genHashAggregateExecPullOutHelper(
-      groupingExpressions: Seq[NamedExpression],
       aggregateExpressions: Seq[AggregateExpression],
       aggregateAttributes: Seq[Attribute]): HashAggregateExecPullOutBaseHelper
 
-  def genColumnarShuffleExchange(shuffle: ShuffleExchangeExec, newChild: SparkPlan): SparkPlan
+  def genColumnarShuffleExchange(shuffle: ShuffleExchangeExec): SparkPlan
 
   /** Generate ShuffledHashJoinExecTransformer. */
   def genShuffledHashJoinExecTransformer(
@@ -129,6 +126,13 @@ trait SparkPlanExecApi {
       left: SparkPlan,
       right: SparkPlan,
       isNullAwareAntiJoin: Boolean = false): BroadcastHashJoinExecTransformerBase
+
+  def genSampleExecTransformer(
+      lowerBound: Double,
+      upperBound: Double,
+      withReplacement: Boolean,
+      seed: Long,
+      child: SparkPlan): SampleExecTransformer
 
   /** Generate ShuffledHashJoinExecTransformer. */
   def genSortMergeJoinExecTransformer(
@@ -170,13 +174,6 @@ trait SparkPlanExecApi {
     GenericExpressionTransformer(substraitExprName, Seq(srcExpr, regexExpr, limitExpr), original)
   }
 
-  def genRandTransformer(
-      substraitExprName: String,
-      explicitSeed: ExpressionTransformer,
-      original: Rand): ExpressionTransformer = {
-    RandTransformer(substraitExprName, explicitSeed, original)
-  }
-
   /** Generate an expression transformer to transform GetMapValue to Substrait. */
   def genGetMapValueTransformer(
       substraitExprName: String,
@@ -192,12 +189,11 @@ trait SparkPlanExecApi {
   }
 
   /** Transform GetArrayItem to Substrait. */
-  def genGetArrayItemExpressionNode(
+  def genGetArrayItemTransformer(
       substraitExprName: String,
-      functionMap: JMap[String, JLong],
-      leftNode: ExpressionNode,
-      rightNode: ExpressionNode,
-      original: GetArrayItem): ExpressionNode
+      left: ExpressionTransformer,
+      right: ExpressionTransformer,
+      original: Expression): ExpressionTransformer
 
   /** Transform NaNvl to Substrait. */
   def genNaNvlTransformer(
@@ -212,26 +208,28 @@ trait SparkPlanExecApi {
     GenericExpressionTransformer(substraitExprName, Seq(), original)
   }
 
-  def genTryAddTransformer(
+  def genTryArithmeticTransformer(
       substraitExprName: String,
       left: ExpressionTransformer,
       right: ExpressionTransformer,
-      original: TryEval): ExpressionTransformer = {
-    throw new GlutenNotSupportException("try_add is not supported")
+      original: TryEval,
+      checkArithmeticExprName: String): ExpressionTransformer = {
+    throw new GlutenNotSupportException(s"$checkArithmeticExprName is not supported")
   }
 
-  def genTryAddTransformer(
+  def genTryEvalTransformer(
       substraitExprName: String,
       child: ExpressionTransformer,
       original: TryEval): ExpressionTransformer = {
     throw new GlutenNotSupportException("try_eval is not supported")
   }
 
-  def genAddTransformer(
+  def genArithmeticTransformer(
       substraitExprName: String,
       left: ExpressionTransformer,
       right: ExpressionTransformer,
-      original: Add): ExpressionTransformer = {
+      original: Expression,
+      checkArithmeticExprName: String): ExpressionTransformer = {
     GenericExpressionTransformer(substraitExprName, Seq(left, right), original)
   }
 
@@ -252,6 +250,42 @@ trait SparkPlanExecApi {
     throw new GlutenNotSupportException("filter(on array) is not supported")
   }
 
+  /** Transform array forall to Substrait. */
+  def genArrayForAllTransformer(
+      substraitExprName: String,
+      argument: ExpressionTransformer,
+      function: ExpressionTransformer,
+      expr: ArrayForAll): ExpressionTransformer = {
+    throw new GlutenNotSupportException("all_match is not supported")
+  }
+
+  /** Transform array array_sort to Substrait. */
+  def genArraySortTransformer(
+      substraitExprName: String,
+      argument: ExpressionTransformer,
+      function: ExpressionTransformer,
+      expr: ArraySort): ExpressionTransformer = {
+    throw new GlutenNotSupportException("array_sort(on array) is not supported")
+  }
+
+  /** Transform array exists to Substrait */
+  def genArrayExistsTransformer(
+      substraitExprName: String,
+      argument: ExpressionTransformer,
+      function: ExpressionTransformer,
+      expr: ArrayExists): ExpressionTransformer = {
+    throw new GlutenNotSupportException("any_match is not supported")
+  }
+
+  /** Transform array transform to Substrait. */
+  def genArrayTransformTransformer(
+      substraitExprName: String,
+      argument: ExpressionTransformer,
+      function: ExpressionTransformer,
+      expr: ArrayTransform): ExpressionTransformer = {
+    throw new GlutenNotSupportException("transform(on array) is not supported")
+  }
+
   /** Transform inline to Substrait. */
   def genInlineTransformer(
       substraitExprName: String,
@@ -265,9 +299,7 @@ trait SparkPlanExecApi {
       substraitExprName: String,
       child: ExpressionTransformer,
       original: PosExplode,
-      attributeSeq: Seq[Attribute]): ExpressionTransformer = {
-    PosExplodeTransformer(substraitExprName, child, original, attributeSeq)
-  }
+      attributeSeq: Seq[Attribute]): ExpressionTransformer
 
   /** Transform make_timestamp to Substrait. */
   def genMakeTimestampTransformer(
@@ -282,6 +314,25 @@ trait SparkPlanExecApi {
       children: Seq[ExpressionTransformer],
       expr: RegExpReplace): ExpressionTransformer = {
     GenericExpressionTransformer(substraitExprName, children, expr)
+  }
+
+  def genPreciseTimestampConversionTransformer(
+      substraitExprName: String,
+      children: Seq[ExpressionTransformer],
+      expr: PreciseTimestampConversion): ExpressionTransformer = {
+    throw new GlutenNotSupportException("PreciseTimestampConversion is not supported")
+  }
+
+  // For date_add(cast('2001-01-01' as Date), interval 1 day), backends may handle it in different
+  // ways
+  def genDateAddTransformer(
+      attributeSeq: Seq[Attribute],
+      substraitExprName: String,
+      children: Seq[Expression],
+      expr: Expression): ExpressionTransformer = {
+    val childrenTransformers =
+      children.map(ExpressionConverter.replaceWithExpressionTransformer(_, attributeSeq))
+    GenericExpressionTransformer(substraitExprName, childrenTransformers, expr)
   }
 
   /**
@@ -299,7 +350,8 @@ trait SparkPlanExecApi {
       newPartitioning: Partitioning,
       serializer: Serializer,
       writeMetrics: Map[String, SQLMetric],
-      metrics: Map[String, SQLMetric]): ShuffleDependency[Int, ColumnarBatch, ColumnarBatch]
+      metrics: Map[String, SQLMetric],
+      isSort: Boolean): ShuffleDependency[Int, ColumnarBatch, ColumnarBatch]
 
   /**
    * Generate ColumnarShuffleWriter for ColumnarShuffleManager.
@@ -314,7 +366,10 @@ trait SparkPlanExecApi {
    *
    * @return
    */
-  def createColumnarBatchSerializer(schema: StructType, metrics: Map[String, SQLMetric]): Serializer
+  def createColumnarBatchSerializer(
+      schema: StructType,
+      metrics: Map[String, SQLMetric],
+      isSort: Boolean): Serializer
 
   /** Create broadcast relation for BroadcastExchangeExec */
   def createBroadcastRelation(
@@ -323,6 +378,10 @@ trait SparkPlanExecApi {
       numOutputRows: SQLMetric,
       dataSize: SQLMetric): BuildSideRelation
 
+  def doCanonicalizeForBroadcastMode(mode: BroadcastMode): BroadcastMode = {
+    mode.canonicalized
+  }
+
   /** Create ColumnarWriteFilesExec */
   def createColumnarWriteFilesExec(
       child: SparkPlan,
@@ -330,7 +389,25 @@ trait SparkPlanExecApi {
       partitionColumns: Seq[Attribute],
       bucketSpec: Option[BucketSpec],
       options: Map[String, String],
-      staticPartitions: TablePartitionSpec): WriteFilesExec
+      staticPartitions: TablePartitionSpec): SparkPlan = {
+    ColumnarWriteFilesExec(
+      child,
+      fileFormat,
+      partitionColumns,
+      bucketSpec,
+      options,
+      staticPartitions)
+  }
+
+  /** Create BackendWrite */
+  def createBackendWrite(description: WriteJobDescription): BackendWrite
+
+  /** Create ColumnarArrowEvalPythonExec, for velox backend */
+  def createColumnarArrowEvalPythonExec(
+      udfs: Seq[PythonUDF],
+      resultAttrs: Seq[Attribute],
+      child: SparkPlan,
+      evalType: Int): SparkPlan
 
   /**
    * Generate extended DataSourceV2 Strategies. Currently only for ClickHouse backend.
@@ -386,21 +463,21 @@ trait SparkPlanExecApi {
    *
    * @return
    */
-  def genExtendedColumnarPostRules(): List[SparkSession => Rule[SparkPlan]]
-
-  def genDecimalRoundTransformer(
-      substraitExprName: String,
-      child: ExpressionTransformer,
-      original: Round): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(child), original)
+  def genExtendedColumnarPostRules(): List[SparkSession => Rule[SparkPlan]] = {
+    SparkShimLoader.getSparkShims.getExtendedColumnarPostRules() ::: List()
   }
+
+  def genInjectPostHocResolutionRules(): List[SparkSession => Rule[LogicalPlan]]
+
+  def genInjectExtendedParser(): List[(SparkSession, ParserInterface) => ParserInterface] =
+    List.empty
 
   def genGetStructFieldTransformer(
       substraitExprName: String,
       childTransformer: ExpressionTransformer,
       ordinal: Int,
       original: GetStructField): ExpressionTransformer = {
-    GetStructFieldTransformer(substraitExprName, childTransformer, ordinal, original)
+    GetStructFieldTransformer(substraitExprName, childTransformer, original)
   }
 
   def genNamedStructTransformer(
@@ -409,21 +486,6 @@ trait SparkPlanExecApi {
       original: CreateNamedStruct,
       attributeSeq: Seq[Attribute]): ExpressionTransformer = {
     GenericExpressionTransformer(substraitExprName, children, original)
-  }
-
-  def genEqualNullSafeTransformer(
-      substraitExprName: String,
-      left: ExpressionTransformer,
-      right: ExpressionTransformer,
-      original: EqualNullSafe): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(left, right), original)
-  }
-
-  def genMd5Transformer(
-      substraitExprName: String,
-      child: ExpressionTransformer,
-      original: Md5): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(child), original)
   }
 
   def genStringTranslateTransformer(
@@ -438,44 +500,11 @@ trait SparkPlanExecApi {
       original)
   }
 
-  def genStringLocateTransformer(
-      substraitExprName: String,
-      first: ExpressionTransformer,
-      second: ExpressionTransformer,
-      third: ExpressionTransformer,
-      original: StringLocate): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(first, second, third), original)
-  }
-
-  /**
-   * Generate an ExpressionTransformer to transform Sha2 expression. Sha2Transformer is the default
-   * implementation.
-   */
-  def genSha2Transformer(
+  def genLikeTransformer(
       substraitExprName: String,
       left: ExpressionTransformer,
       right: ExpressionTransformer,
-      original: Sha2): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(left, right), original)
-  }
-
-  /**
-   * Generate an ExpressionTransformer to transform Sha1 expression. Sha1Transformer is the default
-   * implementation.
-   */
-  def genSha1Transformer(
-      substraitExprName: String,
-      child: ExpressionTransformer,
-      original: Sha1): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(child), original)
-  }
-
-  def genSizeExpressionTransformer(
-      substraitExprName: String,
-      child: ExpressionTransformer,
-      original: Size): ExpressionTransformer = {
-    GenericExpressionTransformer(substraitExprName, Seq(child), original)
-  }
+      original: Like): ExpressionTransformer
 
   /**
    * Generate an ExpressionTransformer to transform TruncTimestamp expression.
@@ -487,30 +516,22 @@ trait SparkPlanExecApi {
       timestamp: ExpressionTransformer,
       timeZoneId: Option[String] = None,
       original: TruncTimestamp): ExpressionTransformer = {
-    TruncTimestampTransformer(substraitExprName, format, timestamp, timeZoneId, original)
+    TruncTimestampTransformer(substraitExprName, format, timestamp, original)
   }
+
+  def genDateDiffTransformer(
+      substraitExprName: String,
+      endDate: ExpressionTransformer,
+      startDate: ExpressionTransformer,
+      original: DateDiff): ExpressionTransformer
 
   def genCastWithNewChild(c: Cast): Cast = c
 
   def genHashExpressionTransformer(
       substraitExprName: String,
       exprs: Seq[ExpressionTransformer],
-      original: Expression): ExpressionTransformer = {
-    HashExpressionTransformer(substraitExprName, exprs, original)
-  }
-
-  def genUnixTimestampTransformer(
-      substraitExprName: String,
-      timeExp: ExpressionTransformer,
-      format: ExpressionTransformer,
-      original: ToUnixTimestamp): ExpressionTransformer = {
-    ToUnixTimestampTransformer(
-      substraitExprName,
-      timeExp,
-      format,
-      original.timeZoneId,
-      original.failOnError,
-      original)
+      original: HashExpression[_]): ExpressionTransformer = {
+    GenericExpressionTransformer(substraitExprName, exprs, original)
   }
 
   /** Define backend specfic expression mappings. */
@@ -547,9 +568,10 @@ trait SparkPlanExecApi {
               new JArrayList[ExpressionNode](),
               columnName,
               ConverterUtils.getTypeNode(aggWindowFunc.dataType, aggWindowFunc.nullable),
-              WindowExecTransformer.getFrameBound(frame.upper),
-              WindowExecTransformer.getFrameBound(frame.lower),
-              frame.frameType.sql
+              frame.upper,
+              frame.lower,
+              frame.frameType.sql,
+              originalInputAttributes.asJava
             )
             windowExpressionNodes.add(windowFunctionNode)
           case aggExpression: AggregateExpression =>
@@ -572,9 +594,10 @@ trait SparkPlanExecApi {
               childrenNodeList,
               columnName,
               ConverterUtils.getTypeNode(aggExpression.dataType, aggExpression.nullable),
-              WindowExecTransformer.getFrameBound(frame.upper),
-              WindowExecTransformer.getFrameBound(frame.lower),
-              frame.frameType.sql
+              frame.upper,
+              frame.lower,
+              frame.frameType.sql,
+              originalInputAttributes.asJava
             )
             windowExpressionNodes.add(windowFunctionNode)
           case wf @ (_: Lead | _: Lag) =>
@@ -608,10 +631,11 @@ trait SparkPlanExecApi {
               childrenNodeList,
               columnName,
               ConverterUtils.getTypeNode(offsetWf.dataType, offsetWf.nullable),
-              WindowExecTransformer.getFrameBound(frame.upper),
-              WindowExecTransformer.getFrameBound(frame.lower),
+              frame.upper,
+              frame.lower,
               frame.frameType.sql,
-              offsetWf.ignoreNulls
+              offsetWf.ignoreNulls,
+              originalInputAttributes.asJava
             )
             windowExpressionNodes.add(windowFunctionNode)
           case wf @ NthValue(input, offset: Literal, ignoreNulls: Boolean) =>
@@ -627,10 +651,11 @@ trait SparkPlanExecApi {
               childrenNodeList,
               columnName,
               ConverterUtils.getTypeNode(wf.dataType, wf.nullable),
-              frame.upper.sql,
-              frame.lower.sql,
+              frame.upper,
+              frame.lower,
               frame.frameType.sql,
-              ignoreNulls
+              ignoreNulls,
+              originalInputAttributes.asJava
             )
             windowExpressionNodes.add(windowFunctionNode)
           case wf @ NTile(buckets: Expression) =>
@@ -643,9 +668,10 @@ trait SparkPlanExecApi {
               childrenNodeList,
               columnName,
               ConverterUtils.getTypeNode(wf.dataType, wf.nullable),
-              frame.upper.sql,
-              frame.lower.sql,
-              frame.frameType.sql
+              frame.upper,
+              frame.lower,
+              frame.frameType.sql,
+              originalInputAttributes.asJava
             )
             windowExpressionNodes.add(windowFunctionNode)
           case _ =>
@@ -674,17 +700,20 @@ trait SparkPlanExecApi {
   def postProcessPushDownFilter(
       extraFilters: Seq[Expression],
       sparkExecNode: LeafExecNode): Seq[Expression] = {
+    def getPushedFilter(dataFilters: Seq[Expression]): Seq[Expression] = {
+      val pushedFilters =
+        dataFilters ++ FilterHandler.getRemainingFilters(dataFilters, extraFilters)
+      pushedFilters.filterNot(_.references.exists {
+        attr => SparkShimLoader.getSparkShims.isRowIndexMetadataColumn(attr.name)
+      })
+    }
     sparkExecNode match {
       case fileSourceScan: FileSourceScanExec =>
-        fileSourceScan.dataFilters ++ FilterHandler.getRemainingFilters(
-          fileSourceScan.dataFilters,
-          extraFilters)
+        getPushedFilter(fileSourceScan.dataFilters)
       case batchScan: BatchScanExec =>
         batchScan.scan match {
           case fileScan: FileScan =>
-            fileScan.dataFilters ++ FilterHandler.getRemainingFilters(
-              fileScan.dataFilters,
-              extraFilters)
+            getPushedFilter(fileScan.dataFilters)
           case _ =>
             // TODO: For data lake format use pushedFilters in SupportsPushDownFilters
             extraFilters
@@ -706,5 +735,27 @@ trait SparkPlanExecApi {
 
   def genPostProjectForGenerate(generate: GenerateExec): SparkPlan
 
+  def genPreProjectForArrowEvalPythonExec(arrowEvalPythonExec: ArrowEvalPythonExec): SparkPlan =
+    arrowEvalPythonExec
+
   def maybeCollapseTakeOrderedAndProject(plan: SparkPlan): SparkPlan = plan
+
+  def genDecimalRoundExpressionOutput(decimalType: DecimalType, toScale: Int): DecimalType = {
+    val p = decimalType.precision
+    val s = decimalType.scale
+    // After rounding we may need one more digit in the integral part,
+    // e.g. `ceil(9.9, 0)` -> `10`, `ceil(99, -1)` -> `100`.
+    val integralLeastNumDigits = p - s + 1
+    if (toScale < 0) {
+      // negative scale means we need to adjust `-scale` number of digits before the decimal
+      // point, which means we need at lease `-scale + 1` digits (after rounding).
+      val newPrecision = math.max(integralLeastNumDigits, -toScale + 1)
+      // We have to accept the risk of overflow as we can't exceed the max precision.
+      DecimalType(math.min(newPrecision, DecimalType.MAX_PRECISION), 0)
+    } else {
+      val newScale = math.min(s, toScale)
+      // We have to accept the risk of overflow as we can't exceed the max precision.
+      DecimalType(math.min(integralLeastNumDigits + newScale, 38), newScale)
+    }
+  }
 }

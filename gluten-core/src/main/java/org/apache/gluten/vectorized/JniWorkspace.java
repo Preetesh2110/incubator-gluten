@@ -65,7 +65,8 @@ public class JniWorkspace {
   private static JniWorkspace createDefault() {
     try {
       final String tempRoot =
-          SparkDirectoryUtil.namespace("jni")
+          SparkDirectoryUtil.get()
+              .namespace("jni")
               .mkChildDirRandomly(UUID.randomUUID().toString())
               .getAbsolutePath();
       return createOrGet(tempRoot);
@@ -74,14 +75,14 @@ public class JniWorkspace {
     }
   }
 
-  public static void enableDebug() {
+  public static void enableDebug(String debugDir) {
     // Preserve the JNI libraries even after process exits.
     // This is useful for debugging native code if the debug symbols were embedded in
     // the libraries.
     synchronized (DEFAULT_INSTANCE_INIT_LOCK) {
       if (DEBUG_INSTANCE == null) {
         final File tempRoot =
-            Paths.get("/tmp").resolve("gluten-jni-debug-" + UUID.randomUUID()).toFile();
+            Paths.get(debugDir).resolve("gluten-jni-debug-" + UUID.randomUUID()).toFile();
         try {
           FileUtils.forceMkdir(tempRoot);
         } catch (IOException e) {

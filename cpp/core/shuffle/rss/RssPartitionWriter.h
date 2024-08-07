@@ -20,20 +20,20 @@
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
 
-#include "shuffle/rss/RemotePartitionWriter.h"
+#include "shuffle/PartitionWriter.h"
 #include "shuffle/rss/RssClient.h"
 #include "utils/macros.h"
 
 namespace gluten {
 
-class RssPartitionWriter final : public RemotePartitionWriter {
+class RssPartitionWriter final : public PartitionWriter {
  public:
   RssPartitionWriter(
       uint32_t numPartitions,
       PartitionWriterOptions options,
       arrow::MemoryPool* pool,
       std::shared_ptr<RssClient> rssClient)
-      : RemotePartitionWriter(numPartitions, std::move(options), pool), rssClient_(rssClient) {
+      : PartitionWriter(numPartitions, std::move(options), pool), rssClient_(rssClient) {
     init();
   }
 
@@ -42,7 +42,10 @@ class RssPartitionWriter final : public RemotePartitionWriter {
       std::unique_ptr<InMemoryPayload> inMemoryPayload,
       Evict::type evictType,
       bool reuseBuffers,
-      bool hasComplexType) override;
+      bool hasComplexType,
+      bool isFinal) override;
+
+  arrow::Status evict(uint32_t partitionId, std::unique_ptr<BlockPayload> blockPayload, bool stop) override;
 
   arrow::Status reclaimFixedSize(int64_t size, int64_t* actual) override;
 

@@ -22,7 +22,6 @@ import org.apache.gluten.extension.ValidationResult
 import org.apache.gluten.metrics.MetricsUpdater
 import org.apache.gluten.substrait.rel.LocalFilesNode.ReadFileFormat
 
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.catalog.HiveTableRelation
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSeq, Expression}
@@ -34,7 +33,6 @@ import org.apache.spark.sql.hive.HiveTableScanExecTransformer._
 import org.apache.spark.sql.hive.client.HiveClientImpl
 import org.apache.spark.sql.hive.execution.{AbstractHiveTableScanExec, HiveTableScanExec}
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.Utils
 
 import org.apache.hadoop.hive.ql.io.orc.OrcInputFormat
@@ -47,7 +45,7 @@ import java.net.URI
 case class HiveTableScanExecTransformer(
     requestedAttributes: Seq[Attribute],
     relation: HiveTableRelation,
-    partitionPruningPred: Seq[Expression])(session: SparkSession)
+    partitionPruningPred: Seq[Expression])(@transient session: SparkSession)
   extends AbstractHiveTableScanExec(requestedAttributes, relation, partitionPruningPred)(session)
   with BasicScanExecTransformer {
 
@@ -80,10 +78,6 @@ case class HiveTableScanExecTransformer(
 
   override def metricsUpdater(): MetricsUpdater =
     BackendsApiManager.getMetricsApiInstance.genHiveTableScanTransformerMetricsUpdater(metrics)
-
-  override def doExecuteColumnar(): RDD[ColumnarBatch] = {
-    doExecuteColumnarInternal()
-  }
 
   @transient private lazy val hivePartitionConverter =
     new HivePartitionConverter(session.sessionState.newHadoopConf(), session)
@@ -194,10 +188,6 @@ object HiveTableScanExecTransformer {
     plan.isInstanceOf[HiveTableScanExec]
   }
 
-  def getPartitionFilters(plan: SparkPlan): Seq[Expression] = {
-    plan.asInstanceOf[HiveTableScanExec].partitionPruningPred
-  }
-
   def copyWith(plan: SparkPlan, newPartitionFilters: Seq[Expression]): SparkPlan = {
     val hiveTableScanExec = plan.asInstanceOf[HiveTableScanExec]
     hiveTableScanExec.copy(partitionPruningPred = newPartitionFilters)(sparkSession =
@@ -212,7 +202,7 @@ object HiveTableScanExecTransformer {
           hiveTableScan.relation,
           hiveTableScan.partitionPruningPred)(hiveTableScan.session)
         hiveTableScanTransformer.doValidate()
-      case _ => ValidationResult.notOk("Is not a Hive scan")
+      case _ => ValidationResult.failed("Is not a Hive scan")
     }
   }
 

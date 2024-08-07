@@ -23,10 +23,11 @@ struct UdafEntry {
   const char* name;
   const char* dataType;
 
-  size_t numArgs;
+  int numArgs;
   const char** argTypes;
 
   const char* intermediateType{nullptr};
+  bool variableArity{false};
 };
 
 #define GLUTEN_GET_NUM_UDAF getNumUdaf

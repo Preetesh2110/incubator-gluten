@@ -16,9 +16,6 @@
  */
 package org.apache.spark.sql
 
-import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.joins.ShuffledHashJoinExec
-
 class GlutenJoinSuite extends JoinSuite with GlutenSQLTestsTrait {
 
   override def testNameBlackList: Seq[String] = Seq(
@@ -39,6 +36,8 @@ class GlutenJoinSuite extends JoinSuite with GlutenSQLTestsTrait {
     "SPARK-34593: Preserve broadcast nested loop join partitioning and ordering",
     "SPARK-35984: Config to force applying shuffled hash join",
     "test SortMergeJoin (with spill)",
+    "SPARK-36612: Support left outer join build left or right" +
+      " outer join build right in shuffled hash join",
     // NaN is not supported currently, just skip.
     "NaN and -0.0 in join keys"
   )
@@ -54,15 +53,5 @@ class GlutenJoinSuite extends JoinSuite with GlutenSQLTestsTrait {
         |order by t0.a, t0.b
         |""".stripMargin
     checkAnswer(spark.sql(sql), Seq(Row(0, 1), Row(1, 2), Row(2, 3)))
-  }
-
-  testGluten(
-    "SPARK-43113: Full outer join with duplicate stream-side" +
-      " references in condition (SHJ)") {
-    def check(plan: SparkPlan): Unit = {
-      assert(collect(plan) { case _: ShuffledHashJoinExec => true }.size === 1)
-    }
-
-    dupStreamSideColTest("MERGE", check)
   }
 }

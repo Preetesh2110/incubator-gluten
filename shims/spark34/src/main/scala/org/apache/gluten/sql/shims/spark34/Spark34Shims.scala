@@ -16,12 +16,11 @@
  */
 package org.apache.gluten.sql.shims.spark34
 
-import org.apache.gluten.GlutenConfig
 import org.apache.gluten.expression.{ExpressionNames, Sig}
 import org.apache.gluten.expression.ExpressionNames.KNOWN_NULLABLE
 import org.apache.gluten.sql.shims.{ShimDescriptor, SparkShims}
 
-import org.apache.spark.{ShuffleUtils, SparkContext, SparkContextUtils, SparkException, TaskContext, TaskContextUtils}
+import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.paths.SparkPath
@@ -30,30 +29,36 @@ import org.apache.spark.shuffle.ShuffleHandle
 import org.apache.spark.sql.{AnalysisException, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.catalyst.csv.CSVOptions
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, KeyGroupedPartitioning, Partitioning}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
-import org.apache.spark.sql.catalyst.util.TimestampFormatter
+import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, InternalRowComparableWrapper, TimestampFormatter}
+import org.apache.spark.sql.catalyst.util.RebaseDateTime.RebaseSpec
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read.{HasPartitionKey, InputPartition, Scan}
-import org.apache.spark.sql.execution.{FileSourceScanExec, GlobalLimitExec, GlutenFileFormatWriter, PartitionedFileUtil, SparkPlan, TakeOrderedAndProjectExec}
-import org.apache.spark.sql.execution.datasources.{BucketingUtils, FileFormat, FilePartition, FileScanRDD, PartitionDirectory, PartitionedFile, PartitioningAwareFileIndex, WriteJobDescription, WriteTaskResult}
+import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.command.DataWritingCommandExec
+import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.datasources.v2.text.TextScan
 import org.apache.spark.sql.execution.datasources.v2.utils.CatalogUtil
 import org.apache.spark.sql.execution.exchange.BroadcastExchangeLike
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
+import org.apache.spark.sql.types.{IntegerType, LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.storage.{BlockId, BlockManagerId}
 
 import org.apache.hadoop.fs.{FileStatus, Path}
+import org.apache.parquet.schema.MessageType
 
 import java.time.ZoneOffset
-import java.util.{HashMap => JHashMap, Map => JMap}
+import java.util.{HashMap => JHashMap, Map => JMap, Properties}
 
 import scala.reflect.ClassTag
 
@@ -67,17 +72,16 @@ class Spark34Shims extends SparkShims {
   }
 
   override def scalarExpressionMappings: Seq[Sig] = {
-    val list = if (GlutenConfig.getConf.enableNativeBloomFilter) {
-      Seq(
-        Sig[BloomFilterMightContain](ExpressionNames.MIGHT_CONTAIN),
-        Sig[BloomFilterAggregate](ExpressionNames.BLOOM_FILTER_AGG))
-    } else Seq.empty
-    list ++ Seq(
+    Seq(
       Sig[SplitPart](ExpressionNames.SPLIT_PART),
       Sig[Sec](ExpressionNames.SEC),
       Sig[Csc](ExpressionNames.CSC),
       Sig[KnownNullable](KNOWN_NULLABLE),
-      Sig[Empty2Null](ExpressionNames.EMPTY2NULL)
+      Sig[Empty2Null](ExpressionNames.EMPTY2NULL),
+      Sig[TimestampAdd](ExpressionNames.TIMESTAMP_ADD),
+      Sig[RoundFloor](ExpressionNames.FLOOR),
+      Sig[RoundCeil](ExpressionNames.CEIL),
+      Sig[Mask](ExpressionNames.MASK)
     )
   }
 
@@ -86,7 +90,8 @@ class Spark34Shims extends SparkShims {
       Sig[RegrR2](ExpressionNames.REGR_R2),
       Sig[RegrSlope](ExpressionNames.REGR_SLOPE),
       Sig[RegrIntercept](ExpressionNames.REGR_INTERCEPT),
-      Sig[RegrSXY](ExpressionNames.REGR_SXY)
+      Sig[RegrSXY](ExpressionNames.REGR_SXY),
+      Sig[RegrReplacement](ExpressionNames.REGR_REPLACEMENT)
     )
   }
 
@@ -155,22 +160,65 @@ class Spark34Shims extends SparkShims {
       @transient locations: Array[String] = Array.empty): PartitionedFile =
     PartitionedFile(partitionValues, SparkPath.fromPathString(filePath), start, length, locations)
 
-  override def hasBloomFilterAggregate(
-      agg: org.apache.spark.sql.execution.aggregate.ObjectHashAggregateExec): Boolean = {
-    agg.aggregateExpressions.exists(
-      expr => expr.aggregateFunction.isInstanceOf[BloomFilterAggregate])
+  override def bloomFilterExpressionMappings(): Seq[Sig] = Seq(
+    Sig[BloomFilterMightContain](ExpressionNames.MIGHT_CONTAIN),
+    Sig[BloomFilterAggregate](ExpressionNames.BLOOM_FILTER_AGG)
+  )
+
+  override def newBloomFilterAggregate[T](
+      child: Expression,
+      estimatedNumItemsExpression: Expression,
+      numBitsExpression: Expression,
+      mutableAggBufferOffset: Int,
+      inputAggBufferOffset: Int): TypedImperativeAggregate[T] = {
+    BloomFilterAggregate(
+      child,
+      estimatedNumItemsExpression,
+      numBitsExpression,
+      mutableAggBufferOffset,
+      inputAggBufferOffset).asInstanceOf[TypedImperativeAggregate[T]]
   }
 
-  override def extractSubPlanFromMightContain(expr: Expression): Option[SparkPlan] = {
-    expr match {
-      case mc @ BloomFilterMightContain(sub: org.apache.spark.sql.execution.ScalarSubquery, _) =>
-        Some(sub.plan)
-      case mc @ BloomFilterMightContain(
-            g @ GetStructField(sub: org.apache.spark.sql.execution.ScalarSubquery, _, _),
-            _) =>
-        Some(sub.plan)
-      case _ => None
-    }
+  override def newMightContain(
+      bloomFilterExpression: Expression,
+      valueExpression: Expression): BinaryExpression = {
+    BloomFilterMightContain(bloomFilterExpression, valueExpression)
+  }
+
+  override def replaceBloomFilterAggregate[T](
+      expr: Expression,
+      bloomFilterAggReplacer: (
+          Expression,
+          Expression,
+          Expression,
+          Int,
+          Int) => TypedImperativeAggregate[T]): Expression = expr match {
+    case BloomFilterAggregate(
+          child,
+          estimatedNumItemsExpression,
+          numBitsExpression,
+          mutableAggBufferOffset,
+          inputAggBufferOffset) =>
+      bloomFilterAggReplacer(
+        child,
+        estimatedNumItemsExpression,
+        numBitsExpression,
+        mutableAggBufferOffset,
+        inputAggBufferOffset)
+    case other => other
+  }
+
+  override def replaceMightContain[T](
+      expr: Expression,
+      mightContainReplacer: (Expression, Expression) => BinaryExpression): Expression = expr match {
+    case BloomFilterMightContain(bloomFilterExpression, valueExpression) =>
+      mightContainReplacer(bloomFilterExpression, valueExpression)
+    case other => other
+  }
+
+  override def getFileSizeAndModificationTime(
+      file: PartitionedFile): (Option[Long], Option[Long]) = {
+    (Some(file.fileSize), Some(file.modificationTime))
   }
 
   override def generateMetadataColumns(
@@ -196,8 +244,9 @@ class Spark34Shims extends SparkShims {
         case _ =>
       }
     }
-
-    // TODO: row_index metadata support
+    metadataColumn.put(InputFileName().prettyName, file.filePath.toString)
+    metadataColumn.put(InputFileBlockStart().prettyName, file.start.toString)
+    metadataColumn.put(InputFileBlockLength().prettyName, file.length.toString)
     metadataColumn
   }
 
@@ -250,8 +299,8 @@ class Spark34Shims extends SparkShims {
 
   override def enableNativeWriteFilesByDefault(): Boolean = true
 
-  override def createTestTaskContext(): TaskContext = {
-    TaskContextUtils.createTestTaskContext()
+  override def createTestTaskContext(properties: Properties): TaskContext = {
+    TaskContextUtils.createTestTaskContext(properties)
   }
 
   override def broadcastInternal[T: ClassTag](sc: SparkContext, value: T): Broadcast[T] = {
@@ -291,6 +340,37 @@ class Spark34Shims extends SparkShims {
   override def supportDuplicateReadingTracking: Boolean = true
 
   def getFileStatus(partition: PartitionDirectory): Seq[FileStatus] = partition.files
+
+  def isFileSplittable(
+      relation: HadoopFsRelation,
+      filePath: Path,
+      sparkSchema: StructType): Boolean = {
+    // SPARK-39634: Allow file splitting in combination with row index generation once
+    // the fix for PARQUET-2161 is available.
+    relation.fileFormat
+      .isSplitable(relation.sparkSession, relation.options, filePath) &&
+    !(RowIndexUtil.findRowIndexColumnIndexInSchema(sparkSchema) >= 0)
+  }
+
+  def isRowIndexMetadataColumn(name: String): Boolean = {
+    name == FileFormat.ROW_INDEX_TEMPORARY_COLUMN_NAME
+  }
+
+  def findRowIndexColumnIndexInSchema(sparkSchema: StructType): Int = {
+    sparkSchema.fields.zipWithIndex.find {
+      case (field: StructField, _: Int) =>
+        field.name == FileFormat.ROW_INDEX_TEMPORARY_COLUMN_NAME
+    } match {
+      case Some((field: StructField, idx: Int)) =>
+        if (field.dataType != LongType && field.dataType != IntegerType) {
+          throw new RuntimeException(
+            s"${FileFormat.ROW_INDEX_TEMPORARY_COLUMN_NAME} " +
+              s"must be of LongType or IntegerType")
+        }
+        idx
+      case _ => -1
+    }
+  }
 
   def splitFiles(
       sparkSession: SparkSession,
@@ -368,6 +448,9 @@ class Spark34Shims extends SparkShims {
   override def withTryEvalMode(expr: Expression): Boolean = {
     expr match {
       case a: Add => a.evalMode == EvalMode.TRY
+      case s: Subtract => s.evalMode == EvalMode.TRY
+      case d: Divide => d.evalMode == EvalMode.TRY
+      case m: Multiply => m.evalMode == EvalMode.TRY
       case _ => false
     }
   }
@@ -375,7 +458,39 @@ class Spark34Shims extends SparkShims {
   override def withAnsiEvalMode(expr: Expression): Boolean = {
     expr match {
       case a: Add => a.evalMode == EvalMode.ANSI
+      case s: Subtract => s.evalMode == EvalMode.ANSI
+      case d: Divide => d.evalMode == EvalMode.ANSI
+      case m: Multiply => m.evalMode == EvalMode.ANSI
       case _ => false
     }
+  }
+
+  override def dateTimestampFormatInReadIsDefaultValue(
+      csvOptions: CSVOptions,
+      timeZone: String): Boolean = {
+    val default = new CSVOptions(CaseInsensitiveMap(Map()), csvOptions.columnPruning, timeZone)
+    csvOptions.dateFormatInRead == default.dateFormatInRead &&
+    csvOptions.timestampFormatInRead == default.timestampFormatInRead &&
+    csvOptions.timestampNTZFormatInRead == default.timestampNTZFormatInRead
+  }
+
+  override def isPlannedV1Write(write: DataWritingCommandExec): Boolean = {
+    write.cmd.isInstanceOf[V1WriteCommand] && SQLConf.get.plannedWriteEnabled
+  }
+
+  override def createParquetFilters(
+      conf: SQLConf,
+      schema: MessageType,
+      caseSensitive: Option[Boolean] = None): ParquetFilters = {
+    new ParquetFilters(
+      schema,
+      conf.parquetFilterPushDownDate,
+      conf.parquetFilterPushDownTimestamp,
+      conf.parquetFilterPushDownDecimal,
+      conf.parquetFilterPushDownStringPredicate,
+      conf.parquetFilterPushDownInFilterThreshold,
+      caseSensitive.getOrElse(conf.caseSensitiveAnalysis),
+      RebaseSpec(LegacyBehaviorPolicy.CORRECTED)
+    )
   }
 }

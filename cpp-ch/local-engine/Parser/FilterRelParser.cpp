@@ -31,15 +31,15 @@ DB::QueryPlanPtr FilterRelParser::parse(DB::QueryPlanPtr query_plan, const subst
     substrait::Rel final_rel = rel;
     rewriter.rewrite(final_rel);
 
-    const auto & filter_rel = rel.filter();
+    const auto & filter_rel = final_rel.filter();
     std::string filter_name;
 
     auto input_header = query_plan->getCurrentDataStream().header;
-    DB::ActionsDAGPtr actions_dag = std::make_shared<DB::ActionsDAG>(input_header.getColumnsWithTypeAndName());
+    DB::ActionsDAG actions_dag{input_header.getColumnsWithTypeAndName()};
     const auto condition_node = parseExpression(actions_dag, filter_rel.condition());
     if (filter_rel.condition().has_scalar_function())
     {
-        actions_dag->addOrReplaceInOutputs(*condition_node);
+        actions_dag.addOrReplaceInOutputs(*condition_node);
     }
     filter_name = condition_node->result_name;
 
@@ -51,22 +51,26 @@ DB::QueryPlanPtr FilterRelParser::parse(DB::QueryPlanPtr query_plan, const subst
     else
         input_with_condition.insert(condition_node->result_name);
     
-    actions_dag->removeUnusedActions(input_with_condition);
+    actions_dag.removeUnusedActions(input_with_condition);
     NonNullableColumnsResolver non_nullable_columns_resolver(input_header, *getPlanParser(), filter_rel.condition());
     auto non_nullable_columns = non_nullable_columns_resolver.resolve();
 
-    auto filter_step = std::make_unique<DB::FilterStep>(query_plan->getCurrentDataStream(), actions_dag, filter_name, remove_filter_column);
+    auto filter_step = std::make_unique<DB::FilterStep>(query_plan->getCurrentDataStream(), std::move(actions_dag), filter_name, remove_filter_column);
     filter_step->setStepDescription("WHERE");
     steps.emplace_back(filter_step.get());
     query_plan->addStep(std::move(filter_step));
-    
+ 
+    // header maybe changed, need to rollback it
+    if (!blocksHaveEqualStructure(input_header, query_plan->getCurrentDataStream().header)) {
+        steps.emplace_back(getPlanParser()->addRollbackFilterHeaderStep(query_plan, input_header));
+    }
+   
     // remove nullable
     auto * remove_null_step = getPlanParser()->addRemoveNullableStep(*query_plan, non_nullable_columns);
     if (remove_null_step)
     {
         steps.emplace_back(remove_null_step);
     }
-
     return query_plan;
 }
 

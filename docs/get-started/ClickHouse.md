@@ -31,7 +31,7 @@ In general, we use IDEA for Gluten development and CLion for ClickHouse backend 
 
 Install the software required for compilation, run `sudo ./ep/build-clickhouse/src/install_ubuntu.sh`.
 Under the hood, it will install the following software:
-- Clang 16.0
+- Clang 18.0
 - cmake 3.20 or higher version
 - ninja-build 1.8.2
 
@@ -66,7 +66,7 @@ Otherwise, do:
     ```shell
     export GLUTEN_SOURCE=/path/to/gluten
     export CH_SOURCE_DIR=/path/to/ClickHouse
-    cmake -G Ninja -S ${GLUTEN_SOURCE}/cpp-ch -B ${GLUTEN_SOURCE}/cpp-ch/build_ch -DCH_SOURCE_DIR=${CH_SOURCE_DIR} "-DCMAKE_C_COMPILER=$(command -v clang-16)" "-DCMAKE_CXX_COMPILER=$(command -v clang++-16)" "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+    cmake -G Ninja -S ${GLUTEN_SOURCE}/cpp-ch -B ${GLUTEN_SOURCE}/cpp-ch/build_ch -DCH_SOURCE_DIR=${CH_SOURCE_DIR} "-DCMAKE_C_COMPILER=$(command -v clang-18)" "-DCMAKE_CXX_COMPILER=$(command -v clang++-18)" "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     ```
 
     Next, you need to compile Kyligence/Clickhouse. There are two options:
@@ -629,19 +629,26 @@ public read-only account：gluten/hN2xX3uQ4m
 
 ### Celeborn support
 
-Gluten with clickhouse backend has not yet supportted [Celeborn](https://github.com/apache/celeborn) natively as remote shuffle service using columar shuffle. However, you can still use Celeborn with row shuffle, which means a ColumarBatch will be converted to a row during shuffle.
-Below introduction is used to enable this feature:
+Gluten with clickhouse backend supports [Celeborn](https://github.com/apache/celeborn) as remote shuffle service. Currently, the supported Celeborn versions are `0.3.x`, `0.4.x` and `0.5.x`.
+
+Below introduction is used to enable this feature.
 
 First refer to this URL(https://github.com/apache/celeborn) to setup a celeborn cluster.
+
+When compiling the Gluten Java module, it's required to enable `celeborn` profile, as follows:
+
+```
+mvn clean package -Pbackends-clickhouse -Pspark-3.3 -Pceleborn -DskipTests
+```
 
 Then add the Spark Celeborn Client packages to your Spark application's classpath(usually add them into `$SPARK_HOME/jars`).
 
 - Celeborn: celeborn-client-spark-3-shaded_2.12-[celebornVersion].jar
 
-Currently to use Celeborn following configurations are required in `spark-defaults.conf`
+Currently to use Gluten following configurations are required in `spark-defaults.conf`
 
 ```
-spark.shuffle.manager org.apache.spark.shuffle.celeborn.SparkShuffleManager
+spark.shuffle.manager org.apache.spark.shuffle.gluten.celeborn.CelebornShuffleManager
 
 # celeborn master
 spark.celeborn.master.endpoints clb-master:9097
@@ -669,33 +676,5 @@ spark.celeborn.storage.hdfs.dir hdfs://<namenode>/celeborn
 # please refer to this URL (https://github.com/apache/celeborn/tree/main/assets/spark-patch) to apply the patch into your own Spark.
 spark.dynamicAllocation.enabled false
 ```
-
-#### Celeborn Columnar Shuffle Support
-Currently, the supported Celeborn versions are `0.3.x` and `0.4.0`.
-The native Celeborn support can be enabled by the following configuration
-```
-spark.shuffle.manager=org.apache.spark.shuffle.gluten.celeborn.CelebornShuffleManager
-```
-
-quickly start a celeborn cluster
-```shell
-wget https://archive.apache.org/dist/incubator/celeborn/celeborn-0.3.0-incubating/apache-celeborn-0.3.0-incubating-bin.tgz && \
-tar -zxvf apache-celeborn-0.3.0-incubating-bin.tgz && \
-mv apache-celeborn-0.3.0-incubating-bin/conf/celeborn-defaults.conf.template apache-celeborn-0.3.0-incubating-bin/conf/celeborn-defaults.conf && \
-mv apache-celeborn-0.3.0-incubating-bin/conf/log4j2.xml.template apache-celeborn-0.3.0-incubating-bin/conf/log4j2.xml && \
-mkdir /opt/hadoop && chmod 777 /opt/hadoop && \
-echo -e "celeborn.worker.flusher.threads 4\nceleborn.worker.storage.dirs /tmp\nceleborn.worker.monitor.disk.enabled false" > apache-celeborn-0.3.0-incubating-bin/conf/celeborn-defaults.conf && \
-bash apache-celeborn-0.3.0-incubating-bin/sbin/start-master.sh && bash apache-celeborn-0.3.0-incubating-bin/sbin/start-worker.sh
-```
-
-### Columnar shuffle mode
-We have two modes of columnar shuffle   
-1. prefer cache
-2. prefer spill
-
-Switch through the configuration `spark.gluten.sql.columnar.backend.ch.shuffle.preferSpill`, the default is `false`, enable prefer cache shuffle.
-
-In the prefer cache mode, as much memory as possible will be used to cache the shuffle data. When the memory is insufficient,
-spark will actively trigger the memory spill. You can also specify the threshold size through `spark.gluten.sql.columnar.backend.ch.spillThreshold` to Limit memory usage. The default value is `0MB`, which means no limit on memory usage.
 
 

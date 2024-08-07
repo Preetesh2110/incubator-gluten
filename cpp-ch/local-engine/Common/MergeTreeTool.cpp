@@ -16,14 +16,14 @@
  */
 #include "MergeTreeTool.h"
 
+#include <google/protobuf/util/json_util.h>
+#include <rapidjson/document.h>
+
 #include <IO/ReadBufferFromString.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteBufferFromString.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/MergeTree/IMergeTreeDataPart.h>
-#include <google/protobuf/util/json_util.h>
-#include <rapidjson/rapidjson.h>
-#include <rapidjson/document.h>
 #include <Poco/StringTokenizer.h>
 
 using namespace DB;
@@ -113,7 +113,7 @@ std::shared_ptr<DB::StorageInMemoryMetadata> buildMetaData(
          if (table.order_by_key != MergeTreeTable::TUPLE)
              metadata->primary_key = KeyDescription::parse(table.order_by_key, metadata->getColumns(), context);
          else
-            metadata->primary_key.expression = std::make_shared<ExpressionActions>(std::make_shared<ActionsDAG>());
+            metadata->primary_key.expression = std::make_shared<ExpressionActions>(ActionsDAG{});
     }
     else
     {
@@ -226,8 +226,41 @@ RangesInDataParts MergeTreeTable::extractRange(DataPartsVector parts_vector) con
             ranges_in_data_part.data_part = name_index.at(part.name);
             ranges_in_data_part.part_index_in_query = 0;
             ranges_in_data_part.ranges.emplace_back(MarkRange(part.begin, part.end));
+            ranges_in_data_part.alter_conversions = std::make_shared<AlterConversions>();
             return ranges_in_data_part;
         });
     return ranges_in_data_parts;
+}
+
+bool sameColumns(const substrait::NamedStruct & left, const substrait::NamedStruct & right)
+{
+    if (left.names_size() != right.names_size())
+        return false;
+    std::unordered_map<String, substrait::Type::KindCase> map;
+    for (size_t i = 0; i < left.names_size(); i++)
+        map.emplace(left.names(i), left.struct_().types(i).kind_case());
+    for (size_t i = 0; i < right.names_size(); i++)
+    {
+        if (!map.contains(right.names(i)) || map[right.names(i)] != right.struct_().types(i).kind_case())
+            return false;
+    }
+    return true;
+}
+
+bool MergeTreeTable::sameStructWith(const MergeTreeTable & other)
+{
+    return database == other.database &&
+        table == other.table &&
+        snapshot_id == other.snapshot_id &&
+        sameColumns(schema, other.schema) &&
+        order_by_key == other.order_by_key &&
+        low_card_key == other.low_card_key &&
+        minmax_index_key == other.minmax_index_key &&
+        bf_index_key == other.bf_index_key &&
+        set_index_key == other.set_index_key &&
+        primary_key == other.primary_key &&
+        relative_path == other.relative_path &&
+        absolute_path == other.absolute_path &&
+        table_configs.storage_policy == other.table_configs.storage_policy;
 }
 }

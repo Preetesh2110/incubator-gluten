@@ -91,7 +91,7 @@ case class SortExecTransformer(
 
   override protected def doValidateInternal(): ValidationResult = {
     if (!BackendsApiManager.getSettings.supportSortExec()) {
-      return ValidationResult.notOk("Current backend does not support sort")
+      return ValidationResult.failed("Current backend does not support sort")
     }
     val substraitContext = new SubstraitContext
     val operatorId = substraitContext.nextOperatorId(this.nodeName)
@@ -101,8 +101,8 @@ case class SortExecTransformer(
     doNativeValidation(substraitContext, relNode)
   }
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
+  override protected def doTransform(context: SubstraitContext): TransformContext = {
+    val childCtx = child.asInstanceOf[TransformSupport].transform(context)
     val operatorId = context.nextOperatorId(this.nodeName)
     if (sortOrder == null || sortOrder.isEmpty) {
       // The computing for this project is not needed.

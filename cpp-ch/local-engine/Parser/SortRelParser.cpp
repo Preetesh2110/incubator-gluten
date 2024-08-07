@@ -15,10 +15,12 @@
  * limitations under the License.
  */
 #include "SortRelParser.h"
+
+#include <Common/GlutenConfig.h>
 #include <Parser/RelParser.h>
 #include <Processors/QueryPlan/SortingStep.h>
-#include <Poco/Logger.h>
 #include <Common/logger_useful.h>
+#include <Common/QueryContext.h>
 
 namespace DB
 {
@@ -40,8 +42,15 @@ SortRelParser::parse(DB::QueryPlanPtr query_plan, const substrait::Rel & rel, st
     size_t limit = parseLimit(rel_stack_);
     const auto & sort_rel = rel.sort();
     auto sort_descr = parseSortDescription(sort_rel.sorts(), query_plan->getCurrentDataStream().header);
+    SortingStep::Settings settings(*getContext());
+    auto config = MemoryConfig::loadFromContext(getContext());
+    double spill_mem_ratio = config.spill_mem_ratio;
+    settings.worth_external_sort = [spill_mem_ratio]() -> bool
+    {
+        return currentThreadGroupMemoryUsageRatio() > spill_mem_ratio;
+    };
     auto sorting_step = std::make_unique<DB::SortingStep>(
-        query_plan->getCurrentDataStream(), sort_descr, limit, SortingStep::Settings(*getContext()), false);
+        query_plan->getCurrentDataStream(), sort_descr, limit, settings, false);
     sorting_step->setStepDescription("Sorting step");
     steps.emplace_back(sorting_step.get());
     query_plan->addStep(std::move(sorting_step));

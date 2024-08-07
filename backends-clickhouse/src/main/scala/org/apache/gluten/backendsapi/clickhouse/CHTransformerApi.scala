@@ -23,7 +23,8 @@ import org.apache.gluten.substrait.expression.{BooleanLiteralNode, ExpressionBui
 import org.apache.gluten.utils.{CHInputPartitionsUtil, ExpressionDocUtil}
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.rpc.GlutenDriverEndpoint
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.delta.catalog.ClickHouseTableV2
 import org.apache.spark.sql.delta.files.TahoeFileIndex
@@ -44,12 +45,14 @@ class CHTransformerApi extends TransformerApi with Logging {
   /** Generate Seq[InputPartition] for FileSourceScanExecTransformer. */
   def genInputPartitionSeq(
       relation: HadoopFsRelation,
+      requiredSchema: StructType,
       selectedPartitions: Array[PartitionDirectory],
       output: Seq[Attribute],
       bucketedScan: Boolean,
       optionalBucketSet: Option[BitSet],
       optionalNumCoalescedBuckets: Option[Int],
-      disableBucketedScan: Boolean): Seq[InputPartition] = {
+      disableBucketedScan: Boolean,
+      filterExprs: Seq[Expression]): Seq[InputPartition] = {
     relation.location match {
       case index: TahoeFileIndex
           if relation.fileFormat
@@ -64,14 +67,14 @@ class CHTransformerApi extends TransformerApi with Logging {
             bucketedScan,
             optionalBucketSet,
             optionalNumCoalescedBuckets,
-            disableBucketedScan
+            disableBucketedScan,
+            filterExprs
           )
-      case _: TahoeFileIndex =>
-        throw new UnsupportedOperationException("Does not support delta-parquet")
       case _ =>
         // Generate FilePartition for Parquet
         CHInputPartitionsUtil(
           relation,
+          requiredSchema,
           selectedPartitions,
           output,
           bucketedScan,
@@ -89,12 +92,6 @@ class CHTransformerApi extends TransformerApi with Logging {
       val offHeapSize =
         nativeConfMap.getOrDefault("spark.gluten.memory.offHeap.size.in.bytes", "0").toLong
       if (offHeapSize > 0) {
-        // Only set default max_bytes_before_external_sort for CH when it is not set explicitly.
-        val sortSpillKey = settingPrefix + "max_bytes_before_external_sort";
-        if (!nativeConfMap.containsKey(sortSpillKey)) {
-          val sortSpillValue = offHeapSize * 0.5
-          nativeConfMap.put(sortSpillKey, sortSpillValue.toLong.toString)
-        }
 
         // Only set default max_bytes_before_external_group_by for CH when it is not set explicitly.
         val groupBySpillKey = settingPrefix + "max_bytes_before_external_group_by";
@@ -201,22 +198,11 @@ class CHTransformerApi extends TransformerApi with Logging {
 
   }
 
-  override def createDateDiffParamList(
-      start: ExpressionNode,
-      end: ExpressionNode): Iterable[ExpressionNode] = {
-    List(ExpressionBuilder.makeStringLiteral("day"), start, end)
-  }
-
-  override def createLikeParamList(
-      left: ExpressionNode,
-      right: ExpressionNode,
-      escapeChar: ExpressionNode): Iterable[ExpressionNode] =
-    List(left, right)
-
   override def createCheckOverflowExprNode(
       args: java.lang.Object,
       substraitExprName: String,
       childNode: ExpressionNode,
+      childResultType: DataType,
       dataType: DecimalType,
       nullable: Boolean,
       nullOnOverflow: Boolean): ExpressionNode = {
@@ -242,4 +228,8 @@ class CHTransformerApi extends TransformerApi with Logging {
   }
 
   override def packPBMessage(message: Message): Any = Any.pack(message)
+
+  override def invalidateSQLExecutionResource(executionId: String): Unit = {
+    GlutenDriverEndpoint.invalidateResourceRelation(executionId)
+  }
 }

@@ -20,7 +20,7 @@ import org.apache.gluten.GlutenConfig
 import org.apache.gluten.utils.UTSystemParameters
 
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.{DataFrame, Row, TestUtils}
 import org.apache.spark.sql.catalyst.optimizer.{ConstantFolding, NullPropagation}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -281,6 +281,12 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
     }
   }
 
+  test("Test get_json_object 11") {
+    runQueryAndCompare(
+      "SELECT string_field1 from json_test where" +
+        " get_json_object(string_field1, '$.a') is not null") { _ => }
+  }
+
   test("Test covar_samp") {
     runQueryAndCompare("SELECT covar_samp(double_field1, int_field1) from json_test") { _ => }
   }
@@ -495,13 +501,54 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
   }
 
   test("test round issue: https://github.com/oap-project/gluten/issues/3462") {
-    runQueryAndCompare(
-      "select round(0.41875d * id , 4) from range(10);"
-    )(checkGlutenOperatorMatch[ProjectExecTransformer])
+    def checkResult(df: DataFrame, exceptedResult: Seq[Row]): Unit = {
+      // check the result
+      val result = df.collect()
+      assert(result.size == exceptedResult.size)
+      TestUtils.compareAnswers(result, exceptedResult)
+    }
 
-    runQueryAndCompare(
-      "select round(0.41875f * id , 4) from range(10);"
-    )(checkGlutenOperatorMatch[ProjectExecTransformer])
+    runSql("select round(0.41875d * id , 4) from range(10);")(
+      df => {
+        checkGlutenOperatorMatch[ProjectExecTransformer](df)
+
+        checkResult(
+          df,
+          Seq(
+            Row(0.0),
+            Row(0.4188),
+            Row(0.8375),
+            Row(1.2563),
+            Row(1.675),
+            Row(2.0938),
+            Row(2.5125),
+            Row(2.9313),
+            Row(3.35),
+            Row(3.7688)
+          )
+        )
+      })
+
+    runSql("select round(0.41875f * id , 4) from range(10);")(
+      df => {
+        checkGlutenOperatorMatch[ProjectExecTransformer](df)
+
+        checkResult(
+          df,
+          Seq(
+            Row(0.0f),
+            Row(0.4188f),
+            Row(0.8375f),
+            Row(1.2562f),
+            Row(1.675f),
+            Row(2.0938f),
+            Row(2.5125f),
+            Row(2.9312f),
+            Row(3.35f),
+            Row(3.7688f)
+          )
+        )
+      })
   }
 
   test("test date comparision expression override") {
@@ -667,4 +714,20 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
 
   }
 
+  test("array functions with lambda") {
+    withTable("tb_array") {
+      sql("create table tb_array(ids array<int>) using parquet")
+      sql("""
+            |insert into tb_array values (array(1,5,2,null, 3)), (array(1,1,3,2)), (null), (array())
+            |""".stripMargin)
+      val transform_sql = "select transform(ids, x -> x + 1) from tb_array"
+      runQueryAndCompare(transform_sql)(checkGlutenOperatorMatch[ProjectExecTransformer])
+
+      val filter_sql = "select filter(ids, x -> x % 2 == 1) from tb_array";
+      runQueryAndCompare(filter_sql)(checkGlutenOperatorMatch[ProjectExecTransformer])
+
+      val aggregate_sql = "select ids, aggregate(ids, 3, (acc, x) -> acc + x) from tb_array";
+      runQueryAndCompare(aggregate_sql)(checkGlutenOperatorMatch[ProjectExecTransformer])
+    }
+  }
 }

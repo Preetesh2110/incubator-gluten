@@ -30,11 +30,10 @@ public class CHShuffleSplitterJniWrapper {
       String dataFile,
       String localDirs,
       int subDirsPerLocalDir,
-      boolean preferSpill,
       long spillThreshold,
       String hashAlgorithm,
-      boolean throwIfMemoryExceed,
-      boolean flushBlockBufferBeforeEvict) {
+      long maxSortBufferSize,
+      boolean forceMemorySort) {
     return nativeMake(
         part.getShortName(),
         part.getNumPartitions(),
@@ -47,11 +46,10 @@ public class CHShuffleSplitterJniWrapper {
         dataFile,
         localDirs,
         subDirsPerLocalDir,
-        preferSpill,
         spillThreshold,
         hashAlgorithm,
-        throwIfMemoryExceed,
-        flushBlockBufferBeforeEvict);
+        maxSortBufferSize,
+        forceMemorySort);
   }
 
   public long makeForRSS(
@@ -63,8 +61,7 @@ public class CHShuffleSplitterJniWrapper {
       long spillThreshold,
       String hashAlgorithm,
       Object pusher,
-      boolean throwIfMemoryExceed,
-      boolean flushBlockBufferBeforeEvict) {
+      boolean forceMemorySort) {
     return nativeMakeForRSS(
         part.getShortName(),
         part.getNumPartitions(),
@@ -77,8 +74,7 @@ public class CHShuffleSplitterJniWrapper {
         spillThreshold,
         hashAlgorithm,
         pusher,
-        throwIfMemoryExceed,
-        flushBlockBufferBeforeEvict);
+        forceMemorySort);
   }
 
   public native long nativeMake(
@@ -93,11 +89,10 @@ public class CHShuffleSplitterJniWrapper {
       String dataFile,
       String localDirs,
       int subDirsPerLocalDir,
-      boolean preferSpill,
       long spillThreshold,
       String hashAlgorithm,
-      boolean throwIfMemoryExceed,
-      boolean flushBlockBufferBeforeEvict);
+      long maxSortBufferSize,
+      boolean forceMemorySort);
 
   public native long nativeMakeForRSS(
       String shortName,
@@ -111,12 +106,9 @@ public class CHShuffleSplitterJniWrapper {
       long spillThreshold,
       String hashAlgorithm,
       Object pusher,
-      boolean throwIfMemoryExceed,
-      boolean flushBlockBufferBeforeEvict);
+      boolean forceMemorySort);
 
   public native void split(long splitterId, long block);
-
-  public native long evict(long splitterId);
 
   public native CHSplitResult stop(long splitterId) throws IOException;
 

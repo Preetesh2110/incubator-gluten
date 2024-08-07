@@ -18,11 +18,11 @@ package org.apache.gluten.backendsapi
 
 import org.apache.gluten.substrait.expression.ExpressionNode
 
-import org.apache.spark.sql.catalyst.expressions.Attribute
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.{HadoopFsRelation, PartitionDirectory}
-import org.apache.spark.sql.types.DecimalType
+import org.apache.spark.sql.types.{DataType, DecimalType, StructType}
 import org.apache.spark.util.collection.BitSet
 
 import com.google.protobuf.{Any, Message}
@@ -34,12 +34,14 @@ trait TransformerApi {
   /** Generate Seq[InputPartition] for FileSourceScanExecTransformer. */
   def genInputPartitionSeq(
       relation: HadoopFsRelation,
+      requiredSchema: StructType,
       selectedPartitions: Array[PartitionDirectory],
       output: Seq[Attribute],
       bucketedScan: Boolean,
       optionalBucketSet: Option[BitSet],
       optionalNumCoalescedBuckets: Option[Int],
-      disableBucketedScan: Boolean): Seq[InputPartition]
+      disableBucketedScan: Boolean,
+      filterExprs: Seq[Expression] = Seq.empty): Seq[InputPartition]
 
   /**
    * Post process native config For example, for ClickHouse backend, sync 'spark.executor.cores' to
@@ -57,17 +59,11 @@ trait TransformerApi {
     plan.output
   }
 
-  def createDateDiffParamList(start: ExpressionNode, end: ExpressionNode): Iterable[ExpressionNode]
-
-  def createLikeParamList(
-      left: ExpressionNode,
-      right: ExpressionNode,
-      escapeChar: ExpressionNode): Iterable[ExpressionNode]
-
   def createCheckOverflowExprNode(
       args: java.lang.Object,
       substraitExprName: String,
       childNode: ExpressionNode,
+      childResultType: DataType,
       dataType: DecimalType,
       nullable: Boolean,
       nullOnOverflow: Boolean): ExpressionNode
@@ -75,4 +71,7 @@ trait TransformerApi {
   def getNativePlanString(substraitPlan: Array[Byte], details: Boolean): String
 
   def packPBMessage(message: Message): Any
+
+  /** This method is only used for CH backend tests */
+  def invalidateSQLExecutionResource(executionId: String): Unit = {}
 }

@@ -17,17 +17,17 @@
 #pragma once
 #include <algorithm>
 #include <memory>
-#include <Shuffle/ShuffleSplitter.h>
+#include <Shuffle/ShuffleCommon.h>
 #include <Shuffle/SelectorBuilder.h>
 #include <Shuffle/ShuffleWriterBase.h>
 #include <jni.h>
 
 namespace local_engine
 {
-
-class PartitionWriter;
-class LocalPartitionWriter;
-class CelebornPartitionWriter;
+    class CelebornClient;
+    class PartitionWriter;
+    class LocalPartitionWriter;
+    class CelebornPartitionWriter;
 
 class CachedShuffleWriter : public ShuffleWriterBase
 {
@@ -35,16 +35,22 @@ public:
     friend class PartitionWriter;
     friend class LocalPartitionWriter;
     friend class CelebornPartitionWriter;
+    friend class SortBasedPartitionWriter;
+    friend class MemorySortLocalPartitionWriter;
+    friend class MemorySortCelebornPartitionWriter;
+    friend class ExternalSortLocalPartitionWriter;
+    friend class ExternalSortCelebornPartitionWriter;
+    friend class Spillable;
 
-    explicit CachedShuffleWriter(const String & short_name, const SplitOptions & options, jobject rss_pusher = nullptr);
+    explicit CachedShuffleWriter(const String & short_name, const SplitOptions & options,  jobject rss_pusher = nullptr);
     ~CachedShuffleWriter() override = default;
 
     void split(DB::Block & block) override;
-    size_t evictPartitions() override;
     SplitResult stop() override;
 
 private:
     void initOutputIfNeeded(DB::Block & block);
+    void lazyInitPartitionWriter(DB::Block & input_sample);
 
     bool stopped = false;
     DB::Block output_header;
@@ -53,6 +59,9 @@ private:
     std::unique_ptr<SelectorBuilder> partitioner;
     std::vector<size_t> output_columns_indicies;
     std::unique_ptr<PartitionWriter> partition_writer;
+    std::unique_ptr<CelebornClient> celeborn_client;
+    bool sort_shuffle = false;
+    Poco::Logger* logger = &Poco::Logger::get("CachedShuffleWriter");
 };
 }
 

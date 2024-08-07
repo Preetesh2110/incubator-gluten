@@ -28,6 +28,14 @@ fi
 
 JAR_PATH=$LIB_DIR/*
 
+EMBEDDED_SPARK_HOME=$BASEDIR/../spark-home
+
+export SPARK_HOME=${SPARK_HOME:-$EMBEDDED_SPARK_HOME}
+export SPARK_SCALA_VERSION=${SPARK_SCALA_VERSION:-'2.12'}
+
+echo "SPARK_HOME set at [$SPARK_HOME]."
+echo "SPARK_SCALA_VERSION set at [$SPARK_SCALA_VERSION]."
+
 $JAVA_HOME/bin/java $GLUTEN_IT_JVM_ARGS \
     -XX:+IgnoreUnrecognizedVMOptions \
     --add-opens=java.base/java.lang=ALL-UNNAMED \
@@ -40,6 +48,7 @@ $JAVA_HOME/bin/java $GLUTEN_IT_JVM_ARGS \
     --add-opens=java.base/java.util.concurrent=ALL-UNNAMED \
     --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED \
     --add-opens=java.base/jdk.internal.ref=ALL-UNNAMED \
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED \
     --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
     --add-opens=java.base/sun.nio.cs=ALL-UNNAMED \
     --add-opens=java.base/sun.security.action=ALL-UNNAMED \
@@ -47,4 +56,4 @@ $JAVA_HOME/bin/java $GLUTEN_IT_JVM_ARGS \
     -Djdk.reflect.useDirectMethodHandle=false \
     -Dio.netty.tryReflectionSetAccessible=true \
     -cp $JAR_PATH \
-    org.apache.gluten.integration.tpc.Tpc $@
+    org.apache.gluten.integration.Cli $@

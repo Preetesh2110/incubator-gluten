@@ -55,11 +55,6 @@ abstract class SortMergeJoinExecTransformerBase(
   val (bufferedKeys, streamedKeys, bufferedPlan, streamedPlan) =
     (rightKeys, leftKeys, right, left)
 
-  override def simpleStringWithNodeId(): String = {
-    val opId = ExplainUtils.getOpId(this)
-    s"$nodeName $joinType ($opId)".trim
-  }
-
   override def verboseStringWithOperatorId(): String = {
     val joinCondStr = if (condition.isDefined) {
       s"${condition.get}"
@@ -169,7 +164,7 @@ abstract class SortMergeJoinExecTransformerBase(
     // Firstly, need to check if the Substrait plan for this operator can be successfully generated.
     if (substraitJoinType == JoinRel.JoinType.UNRECOGNIZED) {
       return ValidationResult
-        .notOk(s"Found unsupported join type of $joinType for substrait: $substraitJoinType")
+        .failed(s"Found unsupported join type of $joinType for substrait: $substraitJoinType")
     }
     val relNode = JoinUtils.createJoinRel(
       streamedKeys,
@@ -191,12 +186,12 @@ abstract class SortMergeJoinExecTransformerBase(
     doNativeValidation(substraitContext, relNode)
   }
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val streamedPlanContext = streamedPlan.asInstanceOf[TransformSupport].doTransform(context)
+  override protected def doTransform(context: SubstraitContext): TransformContext = {
+    val streamedPlanContext = streamedPlan.asInstanceOf[TransformSupport].transform(context)
     val (inputStreamedRelNode, inputStreamedOutput) =
       (streamedPlanContext.root, streamedPlanContext.outputAttributes)
 
-    val bufferedPlanContext = bufferedPlan.asInstanceOf[TransformSupport].doTransform(context)
+    val bufferedPlanContext = bufferedPlan.asInstanceOf[TransformSupport].transform(context)
     val (inputBuildRelNode, inputBuildOutput) =
       (bufferedPlanContext.root, bufferedPlanContext.outputAttributes)
 
@@ -255,11 +250,10 @@ case class SortMergeJoinExecTransformer(
     projectList) {
 
   override protected def doValidateInternal(): ValidationResult = {
-    val substraitContext = new SubstraitContext
     // Firstly, need to check if the Substrait plan for this operator can be successfully generated.
     if (substraitJoinType == JoinRel.JoinType.JOIN_TYPE_OUTER) {
       return ValidationResult
-        .notOk(s"Found unsupported join type of $joinType for velox smj: $substraitJoinType")
+        .failed(s"Found unsupported join type of $joinType for velox smj: $substraitJoinType")
     }
     super.doValidateInternal()
   }

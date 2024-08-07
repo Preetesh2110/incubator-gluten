@@ -20,10 +20,10 @@ package org.apache.spark.sql
  * Why we need a GlutenQueryTest when we already have QueryTest?
  *   1. We need to modify the way org.apache.spark.sql.CHQueryTest#compare compares double
  */
+import org.apache.gluten.backendsapi.BackendsApiManager
 import org.apache.gluten.sql.shims.SparkShimLoader
 
 import org.apache.spark.SPARK_VERSION_SHORT
-import org.apache.spark.rpc.GlutenDriverEndpoint
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -44,25 +44,30 @@ abstract class GlutenQueryTest extends PlanTest {
 
   protected def spark: SparkSession
 
+  def isSparkVersionGE(minSparkVersion: String): Boolean = {
+    val version = SPARK_VERSION_SHORT.split("\\.")
+    val minVersion = minSparkVersion.split("\\.")
+    minVersion(0) < version(0) || (minVersion(0) == version(0) && minVersion(1) <= version(1))
+  }
+
+  def isSparkVersionLE(maxSparkVersion: String): Boolean = {
+    val version = SPARK_VERSION_SHORT.split("\\.")
+    val maxVersion = maxSparkVersion.split("\\.")
+    maxVersion(0) > version(0) || maxVersion(0) == version(0) && maxVersion(1) >= version(1)
+  }
+
   def shouldRun(
       minSparkVersion: Option[String] = None,
       maxSparkVersion: Option[String] = None): Boolean = {
-    val version = SPARK_VERSION_SHORT.split("\\.")
     var shouldRun = true
-    if (!minSparkVersion.isEmpty) {
-      val minVersion = minSparkVersion.get.split("\\.");
-      shouldRun =
-        minVersion(0) < version(0) || (minVersion(0) == version(0) && minVersion(1) <= version(1))
-      if (!maxSparkVersion.isEmpty) {
-        val maxVersion = maxSparkVersion.get.split("\\.")
-        shouldRun = shouldRun && (maxVersion(0) > version(0) || maxVersion(0) == version(
-          0) && maxVersion(1) >= version(1))
+    if (minSparkVersion.isDefined) {
+      shouldRun = isSparkVersionGE(minSparkVersion.get)
+      if (maxSparkVersion.isDefined) {
+        shouldRun = shouldRun && isSparkVersionLE(maxSparkVersion.get)
       }
     } else {
-      if (!maxSparkVersion.isEmpty) {
-        val maxVersion = maxSparkVersion.get.split("\\.")
-        shouldRun =
-          maxVersion(0) > version(0) || maxVersion(0) == version(0) && maxVersion(1) >= version(1)
+      if (maxSparkVersion.isDefined) {
+        shouldRun = isSparkVersionLE(maxSparkVersion.get)
       }
     }
     shouldRun
@@ -84,6 +89,15 @@ abstract class GlutenQueryTest extends PlanTest {
       minSparkVersion: Option[String] = None,
       maxSparkVersion: Option[String] = None)(testFun: => Any): Unit = {
     if (shouldRun(minSparkVersion, maxSparkVersion)) {
+      test(testName) {
+        testFun
+      }
+    }
+  }
+
+  def testWithSpecifiedSparkVersion(testName: String, versions: Array[String])(
+      testFun: => Any): Unit = {
+    if (versions.exists(v => shouldRun(Some(v), Some(v)))) {
       test(testName) {
         testFun
       }
@@ -334,7 +348,7 @@ object GlutenQueryTest extends Assertions {
       SQLExecution.withExecutionId(df.sparkSession, executionId) {
         df.rdd.count() // Also attempt to deserialize as an RDD [SPARK-15791]
       }
-      GlutenDriverEndpoint.invalidateResourceRelation(executionId)
+      BackendsApiManager.getTransformerApiInstance.invalidateSQLExecutionResource(executionId)
     }
 
     val sparkAnswer =

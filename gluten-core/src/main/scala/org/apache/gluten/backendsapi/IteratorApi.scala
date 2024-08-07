@@ -24,7 +24,6 @@ import org.apache.gluten.substrait.rel.LocalFilesNode.ReadFileFormat
 import org.apache.gluten.substrait.rel.SplitInfo
 
 import org.apache.spark._
-import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.StructType
@@ -37,7 +36,8 @@ trait IteratorApi {
       partition: InputPartition,
       partitionSchema: StructType,
       fileFormat: ReadFileFormat,
-      metadataColumnNames: Seq[String]): SplitInfo
+      metadataColumnNames: Seq[String],
+      properties: Map[String, String]): SplitInfo
 
   /** Generate native row partition. */
   def genPartitions(
@@ -48,8 +48,13 @@ trait IteratorApi {
   /**
    * Inject the task attempt temporary path for native write files, this method should be called
    * before `genFirstStageIterator` or `genFinalStageIterator`
+   * @param path
+   *   is the temporary directory for native write pipeline
+   * @param fileName
+   *   is the file name for native write pipeline, backend could generate it by itself.
    */
-  def injectWriteFilesTempPath(path: String): Unit = throw new UnsupportedOperationException()
+  def injectWriteFilesTempPath(path: String, fileName: String): Unit =
+    throw new UnsupportedOperationException()
 
   /**
    * Generate Iterator[ColumnarBatch] for first stage. ("first" means it does not depend on other
@@ -59,7 +64,7 @@ trait IteratorApi {
       inputPartition: BaseGlutenPartition,
       context: TaskContext,
       pipelineTime: SQLMetric,
-      updateInputMetrics: (InputMetricsWrapper) => Unit,
+      updateInputMetrics: InputMetricsWrapper => Unit,
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq()
@@ -81,14 +86,4 @@ trait IteratorApi {
       partitionIndex: Int,
       materializeInput: Boolean = false): Iterator[ColumnarBatch]
   // scalastyle:on argcount
-
-  /** Generate Native FileScanRDD, currently only for ClickHouse Backend. */
-  def genNativeFileScanRDD(
-      sparkContext: SparkContext,
-      wsCxt: WholeStageTransformContext,
-      splitInfos: Seq[SplitInfo],
-      scan: BasicScanExecTransformer,
-      numOutputRows: SQLMetric,
-      numOutputBatches: SQLMetric,
-      scanTime: SQLMetric): RDD[ColumnarBatch]
 }

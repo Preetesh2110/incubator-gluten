@@ -23,10 +23,14 @@ import org.apache.gluten.execution.datasource.{GlutenOrcWriterInjects, GlutenPar
 import org.apache.gluten.expression.UDFMappings
 import org.apache.gluten.vectorized.{CHNativeExpressionEvaluator, JniLibLoader}
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.api.plugin.PluginContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.listener.CHGlutenSQLAppStatusListener
 import org.apache.spark.network.util.JavaUtils
+import org.apache.spark.rpc.{GlutenDriverEndpoint, GlutenExecutorEndpoint}
 import org.apache.spark.sql.execution.datasources.v1._
+import org.apache.spark.util.SparkDirectoryUtil
 
 import org.apache.commons.lang3.StringUtils
 
@@ -34,15 +38,27 @@ import java.util.TimeZone
 
 class CHListenerApi extends ListenerApi with Logging {
 
-  override def onDriverStart(conf: SparkConf): Unit = initialize(conf, isDriver = true)
+  override def onDriverStart(sc: SparkContext, pc: PluginContext): Unit = {
+    GlutenDriverEndpoint.glutenDriverEndpointRef = (new GlutenDriverEndpoint).self
+    CHGlutenSQLAppStatusListener.registerListener(sc)
+    initialize(pc.conf, isDriver = true)
+  }
 
   override def onDriverShutdown(): Unit = shutdown()
 
-  override def onExecutorStart(conf: SparkConf): Unit = initialize(conf, isDriver = false)
+  override def onExecutorStart(pc: PluginContext): Unit = {
+    GlutenExecutorEndpoint.executorEndpoint = new GlutenExecutorEndpoint(pc.executorID, pc.conf)
+    if (pc.conf().get("spark.master").startsWith("local")) {
+      logDebug("Skipping duplicate initializing clickhouse backend on spark local mode")
+    } else {
+      initialize(pc.conf, isDriver = false)
+    }
+  }
 
   override def onExecutorShutdown(): Unit = shutdown()
 
   private def initialize(conf: SparkConf, isDriver: Boolean): Unit = {
+    SparkDirectoryUtil.init(conf)
     val libPath = conf.get(GlutenConfig.GLUTEN_LIB_PATH, StringUtils.EMPTY)
     if (StringUtils.isBlank(libPath)) {
       throw new IllegalArgumentException(
@@ -67,12 +83,12 @@ class CHListenerApi extends ListenerApi with Logging {
     val externalSortKey = s"${CHBackendSettings.getBackendConfigPrefix}.runtime_settings" +
       s".max_bytes_before_external_sort"
     if (conf.getLong(externalSortKey, -1) < 0) {
-      if (conf.getBoolean("spark.memory.offHeap.enabled", false)) {
-        val memSize = JavaUtils.byteStringAsBytes(conf.get("spark.memory.offHeap.size")).toInt
-        if (memSize > 0) {
-          val cores = conf.getInt("spark.executor.cores", 1)
-          val sortMemLimit = ((memSize / cores) * 0.8).toInt
-          logInfo(s"max memory for sorting: $sortMemLimit")
+      if (conf.getBoolean("spark.memory.offHeap.enabled", defaultValue = false)) {
+        val memSize = JavaUtils.byteStringAsBytes(conf.get("spark.memory.offHeap.size"))
+        if (memSize > 0L) {
+          val cores = conf.getInt("spark.executor.cores", 1).toLong
+          val sortMemLimit = ((memSize / cores) * 0.8).toLong
+          logDebug(s"max memory for sorting: $sortMemLimit")
           conf.set(externalSortKey, sortMemLimit.toString)
         }
       }
@@ -81,8 +97,7 @@ class CHListenerApi extends ListenerApi with Logging {
     // Load supported hive/python/scala udfs
     UDFMappings.loadFromSparkConf(conf)
 
-    val initKernel = new CHNativeExpressionEvaluator()
-    initKernel.initNative(conf)
+    CHNativeExpressionEvaluator.initNative(conf)
 
     // inject backend-specific implementations to override spark classes
     // FIXME: The following set instances twice in local mode?
@@ -94,7 +109,6 @@ class CHListenerApi extends ListenerApi with Logging {
 
   private def shutdown(): Unit = {
     CHBroadcastBuildSideCache.cleanAll()
-    val kernel = new CHNativeExpressionEvaluator()
-    kernel.finalizeNative()
+    CHNativeExpressionEvaluator.finalizeNative()
   }
 }

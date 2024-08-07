@@ -58,8 +58,7 @@ class VeloxIcebergSuite extends WholeStageTransformerSuite {
     }
   }
 
-  // Ignored due to failures, see https://github.com/apache/incubator-gluten/issues/5362
-  ignore("iceberg bucketed join", Some("3.4")) {
+  testWithSpecifiedSparkVersion("iceberg bucketed join", Some("3.4")) {
     val leftTable = "p_str_tb"
     val rightTable = "p_int_tb"
     withTable(leftTable, rightTable) {
@@ -139,8 +138,7 @@ class VeloxIcebergSuite extends WholeStageTransformerSuite {
     }
   }
 
-  // Ignored due to failures, see https://github.com/apache/incubator-gluten/issues/5362
-  ignore("iceberg bucketed join with partition", Some("3.4")) {
+  testWithSpecifiedSparkVersion("iceberg bucketed join with partition", Some("3.4")) {
     val leftTable = "p_str_tb"
     val rightTable = "p_int_tb"
     withTable(leftTable, rightTable) {
@@ -220,8 +218,7 @@ class VeloxIcebergSuite extends WholeStageTransformerSuite {
     }
   }
 
-  // Ignored due to failures, see https://github.com/apache/incubator-gluten/issues/5362
-  ignore("iceberg bucketed join with partition filter", Some("3.4")) {
+  testWithSpecifiedSparkVersion("iceberg bucketed join with partition filter", Some("3.4")) {
     val leftTable = "p_str_tb"
     val rightTable = "p_int_tb"
     withTable(leftTable, rightTable) {
@@ -302,7 +299,7 @@ class VeloxIcebergSuite extends WholeStageTransformerSuite {
     }
   }
 
-  test("iceberg: time travel") {
+  testWithSpecifiedSparkVersion("iceberg: time travel") {
     withTable("iceberg_tm") {
       spark.sql(s"""
                    |create table iceberg_tm (id int, name string) using iceberg
@@ -458,6 +455,37 @@ class VeloxIcebergSuite extends WholeStageTransformerSuite {
                            |""".stripMargin) {
         checkGlutenOperatorMatch[IcebergScanTransformer]
       }
+    }
+  }
+
+  // Spark configuration spark.sql.iceberg.handle-timestamp-without-timezone is not supported
+  // in Spark 3.4
+  testWithSpecifiedSparkVersion("iceberg partition type - timestamp", Array("3.2", "3.3", "3.5")) {
+    Seq("true", "false").foreach {
+      flag =>
+        withSQLConf(
+          "spark.sql.iceberg.handle-timestamp-without-timezone" -> flag,
+          "spark.sql.iceberg.use-timestamp-without-timezone-in-new-tables" -> flag) {
+          withTable("part_by_timestamp") {
+            spark.sql("""
+                        |create table part_by_timestamp (
+                        |  p timestamp
+                        |) using iceberg
+                        |tblproperties (
+                        |  'format-version' = '1'
+                        |)
+                        |partitioned by (p);
+                        |""".stripMargin)
+
+            // Insert some test rows.
+            spark.sql("""
+                        |insert into table part_by_timestamp
+                        |values (TIMESTAMP '2022-01-01 00:01:20');
+                        |""".stripMargin)
+            val df = spark.sql("select * from part_by_timestamp")
+            checkAnswer(df, Row(java.sql.Timestamp.valueOf("2022-01-01 00:01:20")) :: Nil)
+          }
+        }
     }
   }
 }

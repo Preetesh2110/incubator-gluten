@@ -18,7 +18,7 @@ package org.apache.gluten.execution
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{Row, TestUtils}
-import org.apache.spark.sql.catalyst.optimizer.BuildLeft
+import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
 import org.apache.spark.sql.types.{DecimalType, StructType}
 
 // Some sqls' line length exceeds 100
@@ -73,7 +73,11 @@ class GlutenClickHouseTPCHSuite extends GlutenClickHouseTPCHAbstractSuite {
           val shjBuildLeft = df.queryExecution.executedPlan.collect {
             case shj: ShuffledHashJoinExecTransformerBase if shj.joinBuildSide == BuildLeft => shj
           }
-          assert(shjBuildLeft.size == 2)
+          assert(shjBuildLeft.size == 1)
+          val shjBuildRight = df.queryExecution.executedPlan.collect {
+            case shj: ShuffledHashJoinExecTransformerBase if shj.joinBuildSide == BuildRight => shj
+          }
+          assert(shjBuildRight.size == 1)
       }
     }
   }
@@ -480,6 +484,52 @@ class GlutenClickHouseTPCHSuite extends GlutenClickHouseTPCHAbstractSuite {
     compareResultsAgainstVanillaSpark(select_sql_3, true, { _ => })
 
     spark.sql(table_drop_sql)
+  }
+
+  test("GLUTEN-5904 NaN values from stddev") {
+    val sql1 =
+      """
+        |select a, stddev(b/c) from (select * from values (1,2, 1), (1,3,0) as data(a,b,c))
+        |group by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql1, true, { _ => })
+    val sql2 =
+      """
+        |select a, stddev(b) from (select * from values (1,2, 1) as data(a,b,c)) group by a
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql2, true, { _ => })
+
+  }
+
+  test("existence join") {
+    spark.sql("create table t1(a int, b int) using parquet")
+    spark.sql("create table t2(a int, b int) using parquet")
+    spark.sql("insert into t1 values(0, 0), (1, 2), (2, 3), (3, 4), (null, 5), (6, null)")
+    spark.sql("insert into t2 values(0, 0), (1, 2), (2, 3), (2,4), (null, 5), (6, null)")
+
+    val sql1 = """
+                 |select * from t1 where exists (select 1 from t2 where t1.a = t2.a) or t1.a > 1
+                 |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql1, true, { _ => })
+
+    val sql2 = """
+                 |select * from t1 where exists (select 1 from t2 where t1.a = t2.a) or t1.a > 3
+                 |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql2, true, { _ => })
+
+    val sql3 = """
+                 |select * from t1 where exists (select 1 from t2 where t1.a = t2.a) or t1.b > 0
+                 |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql3, true, { _ => })
+
+    val sql4 = """
+                 |select * from t1 where exists (select 1 from t2
+                 |where t1.a = t2.a and t1.b = t2.b) or t1.a > 0
+                 |""".stripMargin
+    compareResultsAgainstVanillaSpark(sql4, true, { _ => })
+
+    spark.sql("drop table t1")
+    spark.sql("drop table t2")
   }
 }
 // scalastyle:off line.size.limit

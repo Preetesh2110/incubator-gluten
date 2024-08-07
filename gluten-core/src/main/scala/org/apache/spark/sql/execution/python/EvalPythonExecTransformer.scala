@@ -62,7 +62,7 @@ case class EvalPythonExecTransformer(
     // All udfs should be scalar python udf
     for (udf <- udfs) {
       if (!PythonUDF.isScalarPythonUDF(udf)) {
-        return ValidationResult.notOk(s"$udf is not scalar python udf")
+        return ValidationResult.failed(s"$udf is not scalar python udf")
       }
     }
 
@@ -84,8 +84,8 @@ case class EvalPythonExecTransformer(
     doNativeValidation(context, relNode)
   }
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
+  override protected def doTransform(context: SubstraitContext): TransformContext = {
+    val childCtx = child.asInstanceOf[TransformSupport].transform(context)
     val args = context.registeredFunction
     val operatorId = context.nextOperatorId(this.nodeName)
     val expressionNodes = new JArrayList[ExpressionNode]

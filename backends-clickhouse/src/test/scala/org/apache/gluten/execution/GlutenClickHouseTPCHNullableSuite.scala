@@ -16,8 +16,11 @@
  */
 package org.apache.gluten.execution
 
+import org.apache.gluten.GlutenConfig
+
 import org.apache.spark.SparkConf
-import org.apache.spark.sql.catalyst.optimizer.BuildLeft
+import org.apache.spark.sql.catalyst.expressions.Alias
+import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
 
 class GlutenClickHouseTPCHNullableSuite extends GlutenClickHouseTPCHAbstractSuite {
 
@@ -63,7 +66,11 @@ class GlutenClickHouseTPCHNullableSuite extends GlutenClickHouseTPCHAbstractSuit
           val shjBuildLeft = df.queryExecution.executedPlan.collect {
             case shj: ShuffledHashJoinExecTransformerBase if shj.joinBuildSide == BuildLeft => shj
           }
-          assert(shjBuildLeft.size == 2)
+          assert(shjBuildLeft.size == 1)
+          val shjBuildRight = df.queryExecution.executedPlan.collect {
+            case shj: ShuffledHashJoinExecTransformerBase if shj.joinBuildSide == BuildRight => shj
+          }
+          assert(shjBuildRight.size == 1)
       }
     }
   }
@@ -209,5 +216,40 @@ class GlutenClickHouseTPCHNullableSuite extends GlutenClickHouseTPCHAbstractSuit
           |""".stripMargin
       runSql(sql, noFallBack = true) { _ => }
     }
+  }
+
+  test("test rewrite date conversion") {
+    val sqlStr =
+      """
+        |SELECT
+        |to_date(
+        |  from_unixtime(
+        |    unix_timestamp(date_format(l_shipdate, 'yyyyMMdd'), 'yyyyMMdd')
+        |  )
+        |)
+        |FROM lineitem
+        |limit 10
+        |""".stripMargin
+
+    Seq(("true", false), ("false", true)).foreach(
+      conf => {
+        withSQLConf((GlutenConfig.ENABLE_CH_REWRITE_DATE_CONVERSION.key, conf._1)) {
+          runSql(sqlStr)(
+            df => {
+              val project = df.queryExecution.executedPlan.collect {
+                case project: ProjectExecTransformer => project
+              }
+              assert(project.size == 1)
+              assert(
+                project
+                  .apply(0)
+                  .projectList(0)
+                  .asInstanceOf[Alias]
+                  .child
+                  .toString()
+                  .contains("from_unixtime") == conf._2)
+            })
+        }
+      })
   }
 }

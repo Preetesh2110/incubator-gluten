@@ -37,7 +37,6 @@ import org.apache.spark.util.Utils
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.filter2.predicate.{FilterApi, FilterPredicate, Operators}
 import org.apache.parquet.filter2.predicate.FilterApi._
-import org.apache.parquet.filter2.predicate.Operators
 import org.apache.parquet.filter2.predicate.Operators.{Column => _, Eq, Gt, GtEq, Lt, LtEq, NotEq}
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat, ParquetOutputFormat}
 import org.apache.parquet.hadoop.util.HadoopInputFile
@@ -259,7 +258,7 @@ abstract class GltuenParquetFilterSuite extends ParquetFilterSuite with GlutenSQ
   }
 
   // Velox doesn't support ParquetOutputFormat.PAGE_SIZE and ParquetOutputFormat.BLOCK_SIZE.
-  ignore(GlutenTestConstants.GLUTEN_TEST + "Support Parquet column index") {
+  ignoreGluten("Support Parquet column index") {
     // block 1:
     //                      null count  min                                       max
     // page-0                         0  0                                         99

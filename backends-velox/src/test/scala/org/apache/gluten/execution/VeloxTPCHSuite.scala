@@ -42,6 +42,7 @@ abstract class VeloxTPCHTableSupport extends VeloxWholeStageTransformerSuite {
       .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
       .set("spark.sql.files.maxPartitionBytes", "1g")
       .set("spark.sql.shuffle.partitions", "1")
+      .set("spark.gluten.sql.columnar.backend.velox.memInitCapacity", "1m")
       .set("spark.memory.offHeap.size", "2g")
       .set("spark.unsafe.exceptionOnMemoryLeak", "true")
       .set("spark.sql.autoBroadcastJoinThreshold", "-1")
@@ -69,6 +70,7 @@ abstract class VeloxTPCHSuite extends VeloxTPCHTableSupport {
       // for unexpected blank
       .replaceAll("Scan parquet ", "Scan parquet")
       // Spark QueryStageExec will take it's id as argument, replace it with X
+      .replaceAll("Arguments: [0-9]+, [0-9]+", "Arguments: X, X")
       .replaceAll("Arguments: [0-9]+", "Arguments: X")
       // mask PullOutPostProject and PullOutPreProject id
       .replaceAll("_pre_[0-9]*", "_pre_X")
@@ -328,7 +330,7 @@ class VeloxTPCHV1RasSuite extends VeloxTPCHSuite {
     super.sparkConf
       .set("spark.sql.sources.useV1SourceList", "parquet")
       .set("spark.sql.autoBroadcastJoinThreshold", "-1")
-      .set("spark.gluten.sql.ras.enabled", "true")
+      .set("spark.gluten.ras.enabled", "true")
   }
 }
 
@@ -339,7 +341,7 @@ class VeloxTPCHV1BhjRasSuite extends VeloxTPCHSuite {
     super.sparkConf
       .set("spark.sql.sources.useV1SourceList", "parquet")
       .set("spark.sql.autoBroadcastJoinThreshold", "30M")
-      .set("spark.gluten.sql.ras.enabled", "true")
+      .set("spark.gluten.ras.enabled", "true")
   }
 }
 
